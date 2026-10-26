@@ -334,4 +334,7 @@ class OpenXblProvider(RecentPlayersProvider):
         last = db.get_setting("friends_at:" + owner)
         if last and time.time() - int(last) < FRIENDS_REFRESH:
             return
-        db.replace_friends(owner, parse_friends(self.http(OPENXBL_FRIENDS_URL, None, {"X-Authorization": key})))
+        relations = parse_friends(self.http(OPENXBL_FRIENDS_URL, None, {"X-Authorization": key}))
+        db.replace_friends(owner, relations)
+        mutual = sum(1 for r in relations.values() if r == "Friend")
+        self.notes += f", friends loaded {len(relations)} ({mutual} mutual)"

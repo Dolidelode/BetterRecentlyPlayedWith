@@ -427,7 +427,9 @@ def test_friends_refresh_is_throttled_and_never_fails_the_sync(tmp_path):
             return FRIENDS
         return {"content": {"recentPlayers": [{"xuid": "1", "gamertag": "A"}]}}
     svc, prov = SyncService(d), OpenXblProvider(keys, http=http)
-    assert svc.run(prov).ok and svc.run(prov).ok
+    first, second = svc.run(prov), svc.run(prov)
+    assert first.ok and second.ok
+    assert "friends loaded 4 (1 mutual)" in first.message and "friends loaded" not in second.message
     assert sum(u.endswith("/friends") for u in calls) == 1          # second sync within 30 min reuses it
     assert d.friend_relations("Main")["1"] == "Friend"
 
