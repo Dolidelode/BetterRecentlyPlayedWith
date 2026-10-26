@@ -2,7 +2,8 @@
 
 What is (and is not) possible is documented in docs/TWITCH_RESEARCH.md. In short:
 * OpenXBL has no batch presence (verified: comma-separated XUIDs -> SerializationError), so each player
-  costs one request. A small hourly budget is spent on the most useful players, with a per-player cache.
+  costs one request. Only the top LIVE_SCOPE players of Xbox's current list are checked, within a small hourly
+  budget, with a per-player cache.
 * "Live" is only reported when Xbox's own presence record for that XUID contains a broadcast whose provider
   is Twitch. Nothing is guessed from names. Xbox does not give the Twitch channel or stream title, so none
   is shown.
@@ -16,6 +17,7 @@ from .db import Database
 from .providers import ProviderError, http_json
 
 PRESENCE_URL = "https://api.xbl.io/v2/presence/"
+LIVE_SCOPE = 20              # only the top N of Xbox's current recent-players list are ever checked
 HOURLY_BUDGET = 30            # presence requests per hour (20% of the free OpenXBL tier of 150)
 ONLINE_TTL = 10 * 60          # re-check a player who was online after 10 min
 OFFLINE_TTL = 3 * 3600        # ... and an offline one after 3 h
@@ -74,8 +76,9 @@ def migrate_live_table(c) -> None:
 
 
 class LiveChecker:
-    def __init__(self, db: Database, key, http: Callable = http_json, now: Callable[[], float] = time.time):
-        self.db, self.key, self.http, self.now = db, key, http, now
+    def __init__(self, db: Database, key, http: Callable = http_json, now: Callable[[], float] = time.time,
+                 scope: int = LIVE_SCOPE):
+        self.db, self.key, self.http, self.now, self.scope = db, key, http, now, scope
         self.spent: Deque[float] = deque()      # timestamps of requests in the last hour
         self.blocked_until = 0.0                # after a 429
         self.last_error: Optional[str] = None
@@ -89,17 +92,17 @@ class LiveChecker:
 
     # ---- candidates ----
     def candidates(self, limit: int) -> List[dict]:
-        """Accounts due for a check, most useful first: players in Xbox's current list (by position),
-        then by recency. Online players are re-checked sooner than offline ones."""
+        """Accounts due for a check: only the top `scope` of Xbox's current list. Never-checked players first,
+        then the stalest; online players are re-checked sooner than offline ones."""
         t = int(self.now())
         with self.db.lock:
             rows = self.db.conn.execute("""
             SELECT a.id, a.xuid, l.pos, a.last_seen, s.checked_at, s.state
             FROM accounts a
-            LEFT JOIN latest_list l ON l.account_id = a.id
+            JOIN latest_list l ON l.account_id = a.id
             LEFT JOIN live_status s ON s.account_id = a.id
-            WHERE a.xuid IS NOT NULL
-            ORDER BY (l.pos IS NULL), l.pos, a.last_seen DESC""").fetchall()
+            WHERE a.xuid IS NOT NULL AND l.pos < ?
+            ORDER BY l.pos""", (self.scope,)).fetchall()
         due = []
         for r in rows:
             ttl = ONLINE_TTL if (r["state"] or "").casefold() == "online" else OFFLINE_TTL
@@ -156,8 +159,11 @@ class LiveChecker:
                 (t - LIVE_MAX_AGE,)).fetchall()
 
     def coverage(self) -> tuple:
-        """(players checked at least once, players with an XUID)."""
+        """(in-scope players checked at least once, in-scope players)."""
         with self.db.lock:
             c = self.db.conn
-            return (c.execute("SELECT COUNT(*) FROM live_status").fetchone()[0],
-                    c.execute("SELECT COUNT(*) FROM accounts WHERE xuid IS NOT NULL").fetchone()[0])
+            base = ("FROM latest_list l JOIN accounts a ON a.id = l.account_id "
+                    "WHERE a.xuid IS NOT NULL AND l.pos < ?")
+            return (c.execute("SELECT COUNT(*) " + base + " AND EXISTS(SELECT 1 FROM live_status s "
+                              "WHERE s.account_id = a.id)", (self.scope,)).fetchone()[0],
+                    c.execute("SELECT COUNT(*) " + base, (self.scope,)).fetchone()[0])

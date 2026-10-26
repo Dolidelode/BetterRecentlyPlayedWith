@@ -11,7 +11,7 @@ from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         lookup_gamertag)
-from .live import HOURLY_BUDGET, LiveChecker
+from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette
 
@@ -206,8 +206,9 @@ class App:
         ttk.Label(lt, style="Hint.TLabel", wraplength=740, justify="left", text=(
             "A player is listed only when Xbox itself reports an active Twitch broadcast for that exact account "
             "(no name guessing). Xbox does not share the Twitch channel or stream title, so none is shown. "
-            f"To protect your OpenXBL quota at most {HOURLY_BUDGET} presence checks run per hour, so players are "
-            "checked gradually, most recent teammates first.")).pack(fill="x", padx=10, pady=(0, 6))
+            f"Automatic: every 5 minutes it checks your {LIVE_SCOPE} most recent teammates from Xbox's current list. "
+            f"Each check costs one OpenXBL request (at most {HOURLY_BUDGET} per hour; offline players are only "
+            "re-checked every 3 hours).")).pack(fill="x", padx=10, pady=(0, 6))
         cols = ("gamertag", "where", "viewers", "since", "checked")
         self.live_tree = ttk.Treeview(lt, columns=cols, show="headings", selectmode="browse")
         for c, t, w in (("gamertag", "Gamertag", 200), ("where", "Platform", 190), ("viewers", "Viewers", 80),

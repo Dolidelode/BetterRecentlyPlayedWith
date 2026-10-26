@@ -89,7 +89,7 @@ def test_hourly_budget_is_enforced(db):
     seed(db, 40)
     clock = Clock()
     calls = []
-    ck = LiveChecker(db, Key(), http=lambda *a, **k: calls.append(1) or OFFLINE, now=clock)
+    ck = LiveChecker(db, Key(), http=lambda *a, **k: calls.append(1) or OFFLINE, now=clock, scope=40)
     for _ in range(20):
         ck.run_cycle(max_requests=5)
     assert len(calls) == HOURLY_BUDGET
@@ -130,3 +130,23 @@ def test_coverage_counts(db):
     ck = LiveChecker(db, Key(), http=lambda *a, **k: OFFLINE, now=Clock())
     ck.run_cycle(max_requests=3)
     assert ck.coverage() == (3, 4)
+
+
+def test_only_top_of_current_list_is_ever_checked(db):
+    seed(db, 40)                                      # 40 in the list, scope is 20
+    seen = []
+    ck = LiveChecker(db, Key(), http=lambda u, d, h, form=False: seen.append(u.rsplit("/", 1)[1]) or OFFLINE,
+                     now=Clock(), scope=5)
+    for _ in range(5):
+        ck.run_cycle(max_requests=5)
+    assert sorted(seen) == ["1000", "1001", "1002", "1003", "1004"]   # nobody beyond position 5, no repeats
+    assert ck.coverage() == (5, 5)
+
+
+def test_history_players_outside_the_list_are_never_checked(db):
+    seed(db, 3)
+    db.merge_players([Player("Fresh", "9999")], "openxbl", True, now=300)   # old three drop out of the list
+    seen = []
+    ck = LiveChecker(db, Key(), http=lambda u, d, h, form=False: seen.append(u.rsplit("/", 1)[1]) or OFFLINE, now=Clock())
+    ck.run_cycle(max_requests=5)
+    assert seen == ["9999"]

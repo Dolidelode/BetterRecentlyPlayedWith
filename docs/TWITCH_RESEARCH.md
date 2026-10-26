@@ -66,9 +66,9 @@ account linking, no Twitch API key, no hosted backend, no secrets in the exe, no
 | No false matches | Yes (nothing is inferred from names) |
 
 ## What was implemented
-A **Live now** tab that uses a small hourly budget (`HOURLY_BUDGET = 30`, 20% of the free tier) on single-player
-presence checks. Priority: players in Xbox's current list by position, never-checked first, then stale ones (online
-players re-checked after 10 min, offline after 3 h). Results are cached in SQLite (`live_status`). A player is shown
+A **Live now** tab that checks only the top `LIVE_SCOPE = 20` players of Xbox's current recent-players list (not the
+whole history), within a budget of `HOURLY_BUDGET = 30` single-player presence requests per hour (20% of the free
+tier). Never-checked players first, then stale ones (online players re-checked after 10 min, offline after 3 h). Results are cached in SQLite (`live_status`). A player is shown
 only if the fresh (<20 min) presence record contains a broadcast whose provider is Twitch; otherwise nothing is
 claimed. HTTP 429 pauses checks for 15 minutes; a rejected key asks the user to re-add it. Limits and the missing
 channel/title are stated in the tab.
