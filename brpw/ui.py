@@ -276,6 +276,19 @@ class App:
         for i in self.tree.selection():
             webbrowser.open(sotrep.profile_url(self.tree.set(i, "gamertag")))
 
+    def _place_dialog(self, win, width=None, height=None):
+        """Centre a dialog over the main window and bring it to the front. Without this Windows may put a
+        new Toplevel at the screen's top-left corner, out of sight. Dialogs never grab input, so a dialog
+        that is somehow hidden can not freeze the main window."""
+        win.update_idletasks()
+        w, h = width or win.winfo_reqwidth(), height or win.winfo_reqheight()
+        r = self.root
+        x = r.winfo_rootx() + max(0, (r.winfo_width() - w) // 2)
+        y = r.winfo_rooty() + max(0, (r.winfo_height() - h) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        win.lift()
+        win.focus_force()
+
     def _ask_tag(self, title, prompt, values, editable):
         win = tk.Toplevel(self.root)
         win.title(title)
@@ -298,7 +311,7 @@ class App:
         ttk.Button(row, text="Cancel", command=win.destroy).pack(side="left", padx=4)
         win.bind("<Return>", ok)
         win.bind("<Escape>", lambda e: win.destroy())
-        win.grab_set()
+        self._place_dialog(win)
         self.root.wait_window(win)
         return result["v"] or None
 
@@ -330,7 +343,6 @@ class App:
         win = tk.Toplevel(self.root)
         win.title(f"Encounters ({len(rows)} for {len(ids)} player(s))")
         win.configure(bg=self.pal["bg"])
-        win.geometry("520x380")
         ttk.Label(win, style="Hint.TLabel", wraplength=480, text=(
             "'When' is the time this app saw the player. Xbox does not provide real encounter times, and a "
             "player is recorded again only after leaving and re-entering Xbox's recent list.")
@@ -347,6 +359,7 @@ class App:
         for n, r in enumerate(rows):
             tv.insert("", "end", tags=("odd",) if n % 2 else (), values=(
                 r["gamertag"], fmt_ts(r["observed_at"]), "Live" if r["source"] in ("xbox-live", "openxbl") else "Import"))
+        self._place_dialog(win, 520, 380)
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -391,6 +404,7 @@ class App:
         row.pack(pady=6)
         ttk.Button(row, text="Load file...", command=load_file).pack(side="left", padx=4)
         ttk.Button(row, text="Import", command=go).pack(side="left", padx=4)
+        self._place_dialog(win)
 
     # ---- refresh ----
     def _provider(self):

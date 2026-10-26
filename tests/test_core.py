@@ -301,6 +301,24 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.search.set("crew")                              # searching finds tags
     assert names() == ["New2"]
     app.search.set("")
+    # dialogs must open centred over the app window (not at the screen's top-left) and must never grab input
+    seen = {}
+
+    def fake_wait(win):
+        win.update()
+        seen["geo"] = (win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height())
+        seen["grab"] = root.grab_current()
+        win.destroy()
+    app.root.wait_window = fake_wait
+    root.deiconify()
+    root.geometry("820x520+120+90")
+    root.update()
+    app.tree.selection_set(app.tree.get_children()[0])
+    app.tag_selected()
+    rx, ry, rw, rh = root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()
+    x, y, w, h = seen["geo"]
+    assert rx <= x and ry <= y and x + w <= rx + rw + 20 and y + h <= ry + rh + 20, (seen, (rx, ry, rw, rh))
+    assert seen["grab"] is None
     app.refresh_now = lambda *a, **k: None            # no network in tests
     app.tree.selection_set(app.tree.get_children()[0])
     app.acct_var.set("Main")
