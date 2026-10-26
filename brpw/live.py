@@ -17,6 +17,7 @@ from .db import Database
 from .providers import ProviderError, _iso_to_epoch, http_json
 
 SUMMARY_URL = "https://api.xbl.io/v2/player/summary/"
+PRESENCE_URL = "https://api.xbl.io/v2/presence/"   # one player: carries the broadcast record
 BATCH = 10                    # verified maximum that works in one request
 LIVE_SCOPE = 20               # only the top N of Xbox's current recent-players list are ever checked
 HOURLY_BUDGET = 30            # requests per hour (20% of the free OpenXBL tier); 20 players = 2 requests
@@ -54,6 +55,30 @@ def _find_broadcasts(node):
             yield from _find_broadcasts(i)
 
 
+def _apply_broadcast(pres: "Presence", rec: dict) -> None:
+    provider = str(rec.get("provider", "")) or None
+    pres.broadcasting = True
+    pres.provider = provider
+    pres.twitch = "twitch" in (provider or "").casefold()
+    v = rec.get("viewerCount", rec.get("viewers"))
+    pres.viewers = int(v) if isinstance(v, (int, float)) else None
+    pres.broadcast_id = str(rec.get("broadcastId", rec.get("id", ""))) or None
+    s = rec.get("startTime", rec.get("started"))
+    pres.started = int(s) if isinstance(s, (int, float)) else _iso_to_epoch(s)
+
+
+def parse_presence_detail(payload) -> "Presence":
+    """Single-player presence (GET /v2/presence/{xuid}); used only to learn the details of a broadcast."""
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, dict) or "state" not in content:
+        raise ProviderError("Unexpected presence response from OpenXBL.")
+    p = Presence(state=str(content["state"]))
+    rec = next(_find_broadcasts(content), None)
+    if rec is not None:
+        _apply_broadcast(p, rec)
+    return p
+
+
 def parse_summary(payload) -> Dict[str, Presence]:
     """xuid -> Presence for every person in a player-summary response."""
     content = payload.get("content") if isinstance(payload, dict) else None
@@ -69,14 +94,7 @@ def parse_summary(payload) -> Dict[str, Presence]:
         rec = next(_find_broadcasts(p), None)
         pres.broadcasting = p.get("isBroadcasting") is True or rec is not None
         if rec is not None:
-            provider = str(rec.get("provider", "")) or None
-            pres.provider = provider
-            pres.twitch = "twitch" in (provider or "").casefold()
-            v = rec.get("viewerCount", rec.get("viewers"))
-            pres.viewers = int(v) if isinstance(v, (int, float)) else None
-            pres.broadcast_id = str(rec.get("broadcastId", rec.get("id", ""))) or None
-            s = rec.get("startTime", rec.get("started"))
-            pres.started = int(s) if isinstance(s, (int, float)) else _iso_to_epoch(s)
+            _apply_broadcast(pres, rec)
         out[str(p["xuid"])] = pres
     return out
 
@@ -141,6 +159,33 @@ class LiveChecker:
             return "OpenXBL rate limit reached; paused for 15 minutes"
         return str(e)
 
+    def _enrich(self, key: str, account_id: int, xuid: str, p: Presence, respect_budget: bool) -> None:
+        """The summary says "broadcasting" but may not name the service. Fetch that one player's presence for the
+        broadcast record (service, viewers, start time). Skipped when a recent enrichment is stored, so a long
+        broadcast does not cost a request every cycle. Failures never lose the summary result."""
+        if not p.broadcasting or p.provider:
+            return
+        t = int(self.now())
+        with self.db.lock:
+            old = self.db.conn.execute(
+                "SELECT provider, viewers, started, broadcast_id, twitch, checked_at FROM live_status "
+                "WHERE account_id=? AND broadcasting=1 AND provider IS NOT NULL", (account_id,)).fetchone()
+        if old is not None and t - old["checked_at"] < LIVE_MAX_AGE:
+            p.provider, p.viewers, p.started = old["provider"], p.viewers or old["viewers"], old["started"]
+            p.broadcast_id, p.twitch = old["broadcast_id"], bool(old["twitch"])
+            return
+        if (respect_budget and self.budget_left() <= 0) or self.now() < self.blocked_until:
+            return
+        self.spent.append(self.now())
+        try:
+            detail = parse_presence_detail(self.http(PRESENCE_URL + xuid, None, {"X-Authorization": key}))
+        except ProviderError as e:
+            self._handle_error(e)                  # 401 raises, 429 pauses; anything else is just skipped
+            return
+        if detail.broadcasting:
+            p.provider, p.twitch, p.viewers = detail.provider, detail.twitch, detail.viewers or p.viewers
+            p.started, p.broadcast_id = detail.started, detail.broadcast_id
+
     def run_cycle(self, max_requests: int = 3) -> str:
         """Automatic check: refresh the stale players in scope, 10 per request, within the hourly budget."""
         key = self.key.get()
@@ -162,6 +207,7 @@ class LiveChecker:
                 continue
             for c in batch:
                 if c["xuid"] in found:
+                    self._enrich(key, c["id"], c["xuid"], found[c["xuid"]], respect_budget=True)
                     self._store(c["id"], found[c["xuid"]])
                     checked += 1
         return (f"Checked {checked} player(s) in {requests} request(s); "
@@ -185,7 +231,7 @@ class LiveChecker:
         for r in rows:
             res = results[r["id"]] = {
                 "id": r["id"], "gamertag": r["gamertag"], "state": None, "title": None, "seen_at": None,
-                "broadcasting": False, "provider": None, "twitch": False, "viewers": None, "error": None}
+                "broadcasting": False, "provider": None, "twitch": False, "viewers": None, "started": None, "error": None}
             if not r["xuid"]:
                 res["error"] = "no XUID known (imported by name only), so Xbox can't be asked"
             elif len(askable) >= limit:
@@ -209,9 +255,10 @@ class LiveChecker:
                 if p is None:
                     results[r["id"]]["error"] = "Xbox returned nothing for this player"
                     continue
+                self._enrich(key, r["id"], r["xuid"], p, respect_budget=False)   # explicit action: not budget-blocked
                 self._store(r["id"], p)
                 results[r["id"]].update(state=p.state, title=p.title, broadcasting=p.broadcasting,
-                                        provider=p.provider, twitch=p.twitch, viewers=p.viewers)
+                                        provider=p.provider, twitch=p.twitch, viewers=p.viewers, started=p.started)
         return [results[r["id"]] for r in rows]
 
     def _store(self, account_id: int, p: Presence) -> None:

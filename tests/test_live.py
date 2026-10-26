@@ -177,15 +177,16 @@ def test_check_accounts_ignores_freshness_batches_and_explains(db):
                          "1002": person("1002", "Online", "X", False, {"provider": "SomethingElse"})}, calls)
     ck = LiveChecker(db, Key(), http=http, now=Clock())
     out = ck.check_accounts(ids)
-    assert [len(c) for c in calls] == [10, 4]                           # 14 players with an XUID = 2 requests
+    assert [len(c) for c in calls if len(c) > 1] == [10, 4]            # 14 players with an XUID = 2 summary requests
     by = {r["gamertag"]: r for r in out}
     assert by["P0"]["twitch"] and by["P0"]["broadcasting"] and by["P0"]["viewers"] == 42
     assert by["P1"]["broadcasting"] and not by["P1"]["twitch"] and by["P1"]["provider"] is None
     assert by["P2"]["provider"] == "SomethingElse" and not by["P2"]["twitch"]
     assert not by["P3"]["broadcasting"] and by["P3"]["state"] == "Offline"
     assert "XUID" in by["NoXuid"]["error"]
+    n = len(calls)
     ck.check_accounts(ids[:3])                                          # asking again asks Xbox again
-    assert len(calls) == 3
+    assert len(calls) > n
     assert {r["gamertag"] for r in ck.live_now()} == {"P0", "P1", "P2"}
 
 
@@ -212,3 +213,97 @@ def test_check_accounts_caps_players_429_and_bad_key(db):
         LiveChecker(db, Key(), http=denied, now=Clock()).check_accounts(ids)
     assert ei.value.reauth
     assert LiveChecker(db, Key(), http=denied, now=Clock()).check_accounts([]) == []
+
+
+PRESENCE_TWITCH = {"content": {"state": "Online", "devices": [{"titles": [{"name": "Sea of Thieves", "activity": {
+    "broadcast": {"provider": "Twitch", "viewerCount": 77, "startTime": "2026-10-26T20:00:00Z", "broadcastId": "B9"}}}]}]}}
+
+
+def routed_http(summary=None, presence=None, calls=None):
+    """Fake OpenXBL: summary requests echo one person per XUID; single presence requests return `presence[xuid]`."""
+    summary, presence = summary or {}, presence or {}
+
+    def http(url, data, headers, form=False):
+        tail = url.rsplit("/", 1)[1]
+        if "/player/summary/" in url:
+            xs = tail.split(",")
+            if calls is not None:
+                calls.append(("summary", xs))
+            return {"content": {"people": [summary.get(x, person(x)) for x in xs]}}
+        if calls is not None:
+            calls.append(("presence", tail))
+        reply = presence.get(tail)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply if reply is not None else {"content": {}}
+    return http
+
+
+def test_broadcaster_without_named_service_is_enriched_once(db):
+    seed(db, 3)
+    clock, calls = Clock(), []
+    http = routed_http({"1001": person("1001", "Online", "SoT", True)}, {"1001": PRESENCE_TWITCH}, calls)
+    ck = LiveChecker(db, Key(), http=http, now=clock)
+    ck.run_cycle()
+    kinds = [c[0] for c in calls]
+    assert kinds == ["summary", "presence"] and calls[1][1] == "1001"      # one extra request, only for the broadcaster
+    row = {r["gamertag"]: r for r in ck.live_now()}["P1"]
+    assert row["provider"] == "Twitch" and row["twitch"] == 1 and row["viewers"] == 77 and row["started"]
+    clock.t += STALE_AFTER + 1                                              # next cycle: still broadcasting
+    ck.run_cycle()
+    assert [c[0] for c in calls] == ["summary", "presence", "summary"]     # details reused, no second presence request
+    row = {r["gamertag"]: r for r in ck.live_now()}["P1"]
+    assert row["provider"] == "Twitch" and row["twitch"] == 1
+
+
+def test_enrichment_failures_never_lose_the_summary_result(db):
+    seed(db, 2)
+    for failure in (ProviderError("temporary outage"), {"content": {"code": "SerializationError"}}):
+        calls = []
+        http = routed_http({"1000": person("1000", "Online", "SoT", True)}, {"1000": failure}, calls)
+        ck = LiveChecker(db, Key(), http=http, now=Clock())
+        ck.run_cycle()
+        r = {x["gamertag"]: x for x in ck.live_now()}["P0"]
+        assert r["twitch"] == 0 and r["provider"] is None                  # still shown as broadcasting, service not stated
+
+
+def test_enrichment_429_pauses_and_bad_key_raises(db):
+    seed(db, 2)
+
+    def err(code):
+        e = ProviderError(f"HTTP {code}")
+        e.code = code
+        return e
+    clock = Clock()
+    ck = LiveChecker(db, Key(), http=routed_http({"1000": person("1000", "Online", "SoT", True)}, {"1000": err(429)}),
+                     now=clock)
+    ck.run_cycle()
+    assert ck.budget_left() == 0 and {r["gamertag"] for r in ck.live_now()} == {"P0"}
+    with pytest.raises(ProviderError) as ei:
+        LiveChecker(db, Key(), http=routed_http({"1000": person("1000", "Online", "SoT", True)}, {"1000": err(401)}),
+                    now=Clock(1_000_000 + 3 * STALE_AFTER)).run_cycle()      # later, so the stored result is stale
+    assert ei.value.reauth
+
+
+def test_enrichment_respects_budget_in_cycles_but_not_in_check_live(db, monkeypatch):
+    seed(db, 2)
+    calls = []
+    http = routed_http({"1000": person("1000", "Online", "SoT", True)}, {"1000": PRESENCE_TWITCH}, calls)
+    ck = LiveChecker(db, Key(), http=http, now=Clock())
+    for _ in range(HOURLY_BUDGET - 1):
+        ck.spent.append(ck.now())                                          # only one request left in this hour
+    ck.run_cycle()
+    assert [c[0] for c in calls] == ["summary"]                            # the budget went on the summary; no presence
+    out = ck.check_accounts([r["id"] for r in db.list_accounts()])         # the user pressed Check live: always allowed
+    assert [c[0] for c in calls] == ["summary", "summary", "presence"]
+    p0 = next(r for r in out if r["gamertag"] == "P0")
+    assert p0["twitch"] and p0["viewers"] == 77 and p0["started"]
+
+
+def test_parse_presence_detail():
+    from brpw.live import parse_presence_detail
+    p = parse_presence_detail(PRESENCE_TWITCH)
+    assert p.broadcasting and p.twitch and p.viewers == 77 and p.started and p.broadcast_id == "B9"
+    assert not parse_presence_detail({"content": {"state": "Offline"}}).broadcasting
+    with pytest.raises(ProviderError):
+        parse_presence_detail({"content": {"code": "SerializationError"}})

@@ -112,3 +112,11 @@ account, and the query parameters `decoration=` / `decorations=` are ignored. I 
 Xbox endpoint or field name that carries linked accounts, so that is **unverified**; the next step is to capture the real response
 (browser dev tools on xbox.com while signed in) or ask the OpenXBL developer to expose it.
 Players only appear with a Twitch link if they linked it AND enabled "Show icon on my profile".
+
+## Update: broadcaster details via single presence (2026-10-26)
+When the batched summary says a player is broadcasting but its `broadcast` record does not name the service, the app
+makes one extra `GET /v2/presence/{xuid}` for that player only, to read the broadcast record (service, viewers, start
+time). The result is cached with the player for the 20-minute freshness window, so a long broadcast costs one request, not
+one per cycle. In the automatic cycle it respects the hourly budget; **Check live** is an explicit action and is not blocked.
+If presence fails or has no record, the player stays "broadcasting per Xbox (service not stated)". The presence record's
+REST shape is still **unverified** against a real broadcaster.

@@ -473,10 +473,11 @@ class App:
                 twitch, state, game = f"not checked: {r['error']}", "-", ""
             else:
                 state = r["state"]
+                since = f", since {time.strftime('%H:%M', time.localtime(r['started']))}" if r.get("started") else ""
                 if r["twitch"]:
-                    twitch = "LIVE on Twitch (Xbox's broadcast record says Twitch)"
+                    twitch = f"LIVE on Twitch (Xbox's broadcast record says Twitch{since})"
                 elif r["broadcasting"]:
-                    twitch = f"BROADCASTING per Xbox ({r['provider'] or 'service not stated'})"
+                    twitch = f"BROADCASTING per Xbox ({r['provider'] or 'service not stated'}{since})"
                 else:
                     twitch = "not broadcasting"
                 game = r["title"] or ""
