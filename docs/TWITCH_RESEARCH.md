@@ -89,3 +89,14 @@ channel/title are noted in the README.
 3. Wait for SOTREP or OpenXBL to publish linked-account/stream data. The realistic route is to ask the SOTREP owner for an
    official, documented endpoint (for example: XUIDs in, linked Twitch channel out, with an app key), which would make a
    one-request lookup for the latest 20 players possible without scraping.
+
+## Update: batched summary with `isBroadcasting` (verified 2026-10-26)
+Testing OpenXBL's `GET /v2/player/summary/{xuids}` with a real key showed:
+* each person record has `isBroadcasting` (bool), `presenceState`, `presenceText` (localised, e.g. what they play or
+  "49m ago last seen"), `presenceDevices`, and a separate `broadcast` field. No linked/social accounts, no Twitch name.
+* it takes **comma-separated XUIDs: 3 and 10 work; 15 and 20 fail** upstream with "Bad Request - Invalid URL". The app
+  uses batches of 10, so the 20 most recent players cost **2 requests** (previously 20 single presence requests).
+* The earlier finding that the legacy batch *presence* endpoint fails (`SerializationError`) is unchanged.
+* Still **unverified**: what a true broadcast record contains (provider, viewers, start time) and whether the service
+  is Twitch. Until a real broadcaster is seen, a player is labelled "broadcasting per Xbox" and only called Twitch when
+  the broadcast record says so. Profile (`/v2/account/{xuid}`) returns 16 settings, none about linked accounts.

@@ -102,7 +102,13 @@ def _m6(c: sqlite3.Connection) -> None:
     c.execute("ALTER TABLE live_status ADD COLUMN seen_at INTEGER")   # when Xbox says they were last online
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6]  # index i migrates user_version i -> i+1
+def _m7(c: sqlite3.Connection) -> None:
+    # Batched summaries: Xbox's own isBroadcasting flag and the provider named in the broadcast record, if any.
+    c.execute("ALTER TABLE live_status ADD COLUMN broadcasting INTEGER NOT NULL DEFAULT 0")
+    c.execute("ALTER TABLE live_status ADD COLUMN provider TEXT")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

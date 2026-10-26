@@ -280,8 +280,8 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     d.replace_friends("Main", {"2": "Friend", "3": "You follow"})
     new_id = {r["gamertag"]: r["id"] for r in d.list_accounts()}["New2"]
     now = int(time.time())                                              # New2 is confirmed live on Twitch by Xbox
-    d.conn.execute("INSERT INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id) "
-                   "VALUES(?,?,?,?,?,?,?)", (new_id, now, "Online", 1, 5, now - 60, "b"))
+    d.conn.execute("INSERT INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id,broadcasting) "
+                   "VALUES(?,?,?,?,?,?,?,?)", (new_id, now, "Online", 0, 5, now - 60, "b", 1))
     d.conn.commit()
     app = ui.App(root, d)
     root.update()
@@ -348,8 +348,9 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert app.theme == 8
     # "Check live" on selected players: asks Xbox, shows the Twitch icon and a results window
     import time as _t
-    app.live.http = lambda url, data, headers, form=False: {"content": {"state": "Online", "devices": [{"titles": [{
-        "name": "Sea of Thieves", "activity": {"broadcast": {"provider": "Twitch", "viewerCount": 9}}}]}]}}
+    app.live.http = lambda url, data, headers, form=False: {"content": {"people": [
+        {"xuid": x, "presenceState": "Online", "presenceText": "Sea of Thieves", "isBroadcasting": True,
+         "broadcast": {"provider": "Twitch", "viewerCount": 9}} for x in url.rsplit("/", 1)[1].split(",")]}}
     app.tree.selection_set([i for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New"])
     app.check_live_selected()
     end = _t.time() + 5
@@ -586,16 +587,6 @@ def test_switching_xbox_accounts_does_not_create_fake_encounters(db):
     # each account sees its own list positions
     assert {r["gamertag"]: r["pos"] for r in db.list_accounts(owner="Alt")} == {"P1": None, "P2": 0, "P3": 1}
     assert {r["gamertag"]: r["pos"] for r in db.list_accounts(owner="Main")}["P1"] == 0
-
-
-def test_parse_presence_reads_title_and_last_seen():
-    from brpw import live
-    offline = {"content": {"xuid": "1", "state": "Offline", "lastSeen": {
-        "titleName": "Sea of Thieves", "timestamp": "2024-07-29T15:02:02.005445"}}}
-    p = live.parse_presence(offline)
-    assert p.title == "Sea of Thieves" and p.seen_at and not p.twitch
-    online = {"content": {"state": "Online", "devices": [{"titles": [{"name": "Forza Horizon 5"}]}]}}
-    assert live.parse_presence(online).title == "Forza Horizon 5"
 
 
 def test_account_details_summary(db):

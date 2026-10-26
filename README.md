@@ -34,9 +34,9 @@ Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups
 OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
 
 ## Twitch icon
-Select players and press **Check live** to ask Xbox about them right now (up to 10 per click, one OpenXBL request each); a results window shows what Xbox says for each, including players who are offline or broadcasting somewhere other than Twitch.
+Select players and press **Check live** to ask Xbox about them right now (up to 20 per click, 10 per OpenXBL request); a results window shows what Xbox says for each, including players who are offline or broadcasting somewhere other than Twitch.
 
-A small Twitch icon on a row means Xbox reports that player as broadcasting on Twitch right now. It runs by itself every 5 minutes for the 20 most recent players in Xbox's current list, never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
+A small icon on a row means Xbox reports that player as broadcasting right now (Xbox's own `isBroadcasting` flag; it names the service only when its broadcast record does). It runs by itself every 5 minutes for the 20 most recent players in Xbox's current list, 10 players per request, never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
 
 ## Themes and icon
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
