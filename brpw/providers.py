@@ -280,13 +280,17 @@ FRIENDS_REFRESH = 30 * 60
 
 def parse_friends(payload) -> dict:
     """xuid -> relation. 'Friend' = you follow them and they follow you back; otherwise one-directional.
-    If OpenXBL omits the follow flags the person is only known to be 'In your list'."""
-    people = (payload.get("content") or {}).get("people") if isinstance(payload, dict) else None
-    if not isinstance(people, list):
-        raise ProviderError("Unexpected friends response from OpenXBL.")
+    If OpenXBL omits the follow flags the person is only known to be 'In your list'. The list is searched for
+    wherever it sits in the response; an unrecognised response raises an error that shows its structure."""
+    items = _find_player_list(payload)
+    if items is None:
+        people = (payload.get("content") or {}).get("people") if isinstance(payload, dict) else None
+        if isinstance(people, list) and not people:
+            return {}                               # a genuinely empty list
+        raise ProviderError(f"Unexpected friends response from OpenXBL. Structure: {_shape(payload)}")
     out = {}
-    for p in people:
-        x = _xuid(p.get("xuid")) if isinstance(p, dict) else None
+    for p in items:
+        x = _xuid(p.get("xuid") if p.get("xuid") not in (None, "") else p.get("id"))
         if not x:
             continue
         mine, theirs = p.get("isFollowedByCaller"), p.get("isFollowingCaller")
@@ -298,6 +302,8 @@ def parse_friends(payload) -> dict:
             out[x] = "You follow"
         else:
             out[x] = "Follows you"
+    if items and not out:
+        raise ProviderError(f"Friends response had {len(items)} entries but no XUIDs. Structure: {_shape(items[0])}")
     return out
 
 
@@ -305,6 +311,7 @@ class OpenXblProvider(RecentPlayersProvider):
     name = "openxbl"
     live = True
     notes = ""
+    force_friends = False      # a manual refresh ignores the 30-minute friends throttle
 
     def __init__(self, key: OpenXblKey, http=http_json):
         self.key, self.http = key, http
@@ -332,9 +339,14 @@ class OpenXblProvider(RecentPlayersProvider):
         if not owner or not key:
             return
         last = db.get_setting("friends_at:" + owner)
-        if last and time.time() - int(last) < FRIENDS_REFRESH:
+        if not self.force_friends and last and time.time() - int(last) < FRIENDS_REFRESH:
             return
-        relations = parse_friends(self.http(OPENXBL_FRIENDS_URL, None, {"X-Authorization": key}))
+        payload = self.http(OPENXBL_FRIENDS_URL, None, {"X-Authorization": key})
+        relations = parse_friends(payload)
         db.replace_friends(owner, relations)
         mutual = sum(1 for r in relations.values() if r == "Friend")
         self.notes += f", friends loaded {len(relations)} ({mutual} mutual)"
+        if not relations:
+            # an empty result is retried within 5 minutes instead of being trusted for 30
+            db.set_setting("friends_at:" + owner, str(int(time.time()) - FRIENDS_REFRESH + 300))
+            self.notes += f"; OpenXBL answered: {_shape(payload)}"

@@ -70,17 +70,44 @@ def test_similar_gamertags_never_merged(db):
     assert db.count_accounts() == 3
 
 
-def test_group_accounts_keeps_separate_history(db):
-    db.merge_players([Player("Main", "1"), Player("Alt", "2")], "xbox-live", True, now=100)
+def test_tags_are_manual_searchable_and_keep_history(db):
+    db.merge_players([Player("Main", "1"), Player("Alt", "2"), Player("Other", "3")], "xbox-live", True, now=100)
+    ids = {r["gamertag"]: r["id"] for r in db.list_accounts()}
+    db.add_tag([ids["Main"], ids["Alt"]], "  Dave,  crew ")          # cleaned: no commas, single spaces
+    db.add_tag([ids["Main"]], "dave crew")                             # same tag, different case/spacing rules: no duplicate
+    rows = {r["gamertag"]: r["tags"] for r in db.list_accounts()}
+    assert rows["Main"] == "Dave crew" and rows["Alt"] == "Dave crew" and rows["Other"] is None
+    assert {r["gamertag"] for r in db.list_accounts("DAVE")} == {"Main", "Alt"}   # search matches tags, any case
+    assert db.all_tags() == ["Dave crew"] and db.tags_for([ids["Other"]]) == []
+    assert len(db.encounters_for(ids["Main"])) == 1                    # accounts keep separate histories
+    db.add_tag([ids["Alt"]], "friend of mine")
+    assert db.tags_for([ids["Alt"]]) == ["Dave crew", "friend of mine"]
+    db.remove_tag([ids["Alt"]], "Dave crew")
+    assert db.tags_for([ids["Alt"]]) == ["friend of mine"]
+    with pytest.raises(ValueError):
+        db.add_tag([ids["Main"]], " , ")
+
+
+def test_encounters_for_many_combines_accounts(db):
+    db.merge_players([Player("A", "1", observed_at=100), Player("B", "2", observed_at=300)], "import", False)
+    db.merge_players([Player("A", "1", observed_at=200)], "import", False)
     ids = [r["id"] for r in db.list_accounts()]
-    db.group_accounts(ids, "Dave")
-    rows = db.list_accounts()
-    assert {r["person"] for r in rows} == {"Dave"} and len(rows) == 2
-    assert len(db.encounters_for(ids[0])) == 1
-    db.ungroup_accounts([ids[0]])
-    assert sum(1 for r in db.list_accounts() if r["person"]) == 1
-    db.ungroup_accounts([ids[1]])
-    assert db.conn.execute("SELECT COUNT(*) FROM people").fetchone()[0] == 0
+    rows = db.encounters_for_many(ids)
+    assert [(r["gamertag"], r["observed_at"]) for r in rows] == [("B", 300), ("A", 200), ("A", 100)]
+    assert db.encounters_for_many([]) == []
+
+
+def test_existing_groups_become_tags_on_migration(tmp_path):
+    from brpw.db import MIGRATIONS
+    d = Database(tmp_path / "p.db", migrations=MIGRATIONS[:4])        # an older install (schema 4)
+    d.merge_players([Player("A", "1"), Player("B", "2")], "import", False)
+    d.conn.execute("INSERT INTO people(id,name,created_at) VALUES(1,'Old group',0)")
+    d.conn.execute("UPDATE accounts SET person_id=1")
+    d.conn.commit()
+    d.close()
+    d2 = Database(tmp_path / "p.db")
+    assert d2.schema_version() == len(MIGRATIONS) and d2.all_tags() == ["Old group"]
+    assert {r["tags"] for r in d2.list_accounts()} == {"Old group"}
 
 
 def test_provided_timestamps_dedupe(db):
@@ -234,6 +261,7 @@ def test_parse_release():
 
 # ---- app startup / shutdown
 def test_app_startup_shutdown(tmp_path, monkeypatch):
+    import time
     from brpw import ui
     try:
         root = tk.Tk()
@@ -248,11 +276,17 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     from brpw.providers import OpenXblKey
     OpenXblKey(tmp_path / "openxbl_keys.json").add("Main", "k")
     d.replace_friends("Main", {"2": "Friend", "3": "You follow"})
+    new_id = {r["gamertag"]: r["id"] for r in d.list_accounts()}["New2"]
+    now = int(time.time())                                              # New2 is confirmed live on Twitch by Xbox
+    d.conn.execute("INSERT INTO live_status VALUES(?,?,?,?,?,?,?)", (new_id, now, "Online", 1, 5, now - 60, "b"))
+    d.conn.commit()
     app = ui.App(root, d)
     root.update()
     tags = {app.tree.set(i, "gamertag"): app.tree.item(i, "tags") for i in app.tree.get_children()}
     assert "friend" in tags["New"] and "friend" not in tags["New2"] and "friend" not in tags["Old"]
     assert str(app.tree.tag_configure("friend", "background")) == app.pal["friend"]
+    icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
+    assert icons["New2"] and not icons["New"] and not icons["Old"]    # Twitch icon only for the confirmed-live row
     names = lambda: [app.tree.set(i, "gamertag") for i in app.tree.get_children()]
     assert names() == ["New", "New2", "Old"]          # Xbox list order first, then older history
     app.sort_by("last_seen")
@@ -261,20 +295,24 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert names() == ["Old", "New2", "New"]          # toggled: oldest first
     app.sort_by("gamertag")
     assert names() == ["New", "New2", "Old"]          # A-Z
-    app.refresh_now = lambda: None                    # no network in tests
+    d.add_tag([new_id], "crew")
+    app.reload()
+    assert [app.tree.set(i, "tags") for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New2"] == ["crew"]
+    app.search.set("crew")                              # searching finds tags
+    assert names() == ["New2"]
+    app.search.set("")
+    app.refresh_now = lambda *a, **k: None            # no network in tests
     app.tree.selection_set(app.tree.get_children()[0])
     app.acct_var.set("Main")
     app.switch_account()                               # switching accounts: back to the top, selection cleared
     assert app.to_top_after_sync and not app.tree.selection() and app.tree.yview()[0] == 0.0
     app.set_theme(3)
-    assert str(app.tree.tag_configure("friend", "background")) == app.pal["friend"] != ""
+    assert str(app.tree.tag_configure("friend", "background")) == app.pal["friend"]
     assert d.get_setting("theme") == "3" and app.pal["accent"] == "#e0a040" and app.pal["bg"] == "#2a1d12"
     app.set_theme(99)                                  # out of range falls back to the default
     assert app.theme == 8
-    assert app.live_tree.winfo_exists() and app.live_empty.winfo_exists()
-    app.reload_live()
-    app.xkey.remove("Main")                            # no key left: Live now must not start a worker
-    app.live_check_now()                               # no key set: must not start a worker
+    app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
+    app.live_check_now()
     assert not app.live_busy
     app.on_close()
     assert app.closing and app.after_id is None and app.live_after_id is None
@@ -440,3 +478,40 @@ def test_friends_refresh_is_throttled_and_never_fails_the_sync(tmp_path):
     d.set_setting("friends_at:Main", "0")
     out = SyncService(d).run(OpenXblProvider(keys, http=broken))
     assert out.ok and "friends list not updated" in out.message and d.friend_relations("Main")["1"] == "Friend"
+
+
+def test_parse_friends_tolerates_other_shapes_and_explains_failures():
+    from brpw.providers import parse_friends
+    assert parse_friends({"content": {"people": []}}) == {}                         # genuinely empty
+    nested = {"content": {"data": {"friends": [{"id": "5", "gamertag": "X", "isFollowedByCaller": True,
+                                                  "isFollowingCaller": True}]}}}
+    assert parse_friends(nested) == {"5": "Friend"}
+    with pytest.raises(ProviderError, match="no XUIDs"):
+        parse_friends({"content": {"people": [{"gamertag": "NoId"}]}})
+    with pytest.raises(ProviderError, match="Structure"):
+        parse_friends({"content": {"weird": 1}})
+
+
+def test_manual_refresh_bypasses_friends_throttle_and_empty_result_retries_soon(tmp_path):
+    import time
+    from brpw.providers import FRIENDS_REFRESH, OpenXblKey, OpenXblProvider
+    d = Database(tmp_path / "p.db")
+    keys = OpenXblKey(tmp_path / "k.json")
+    keys.add("Main", "key")
+    calls = []
+
+    def http(url, data, headers, form=False):
+        calls.append(url)
+        return {"content": {"people": []}}
+    prov = OpenXblProvider(keys, http=http)
+    prov.notes = ""
+    prov.post_sync(d)
+    assert "friends loaded 0" in prov.notes and "answered" in prov.notes
+    stamp = int(d.get_setting("friends_at:Main"))
+    assert 250 < stamp + FRIENDS_REFRESH - time.time() <= 305                       # an empty list is retried in ~5 min
+    n = len(calls)
+    prov.post_sync(d)                                   # within 5 min and not forced: no new request
+    assert len(calls) == n
+    prov.force_friends = True
+    prov.post_sync(d)                                   # manual refresh asks again
+    assert len(calls) == n + 1

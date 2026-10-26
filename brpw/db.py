@@ -83,7 +83,17 @@ def _m4(c: sqlite3.Connection) -> None:
         PRIMARY KEY(owner, xuid))""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4]  # index i migrates user_version i -> i+1
+def _m5(c: sqlite3.Connection) -> None:
+    # Free-form tags replace the old "person" groups. Existing groups become tags, nothing is lost.
+    c.execute("""CREATE TABLE tags(
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, tag))""")
+    c.execute("CREATE INDEX ix_tags_tag ON tags(tag)")
+    c.execute("INSERT OR IGNORE INTO tags(account_id, tag) "
+              "SELECT a.id, p.name FROM accounts a JOIN people p ON p.id = a.person_id")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -262,18 +272,19 @@ class Database:
     # ---- queries ----
     def list_accounts(self, search: str = "", owner: Optional[str] = None) -> List[sqlite3.Row]:
         q = """SELECT a.id, a.xuid, a.gamertag, a.last_seen, a.first_seen, a.person_id,
-                      p.name AS person, a.source,
+                      (SELECT GROUP_CONCAT(tag, ', ') FROM (SELECT tag FROM tags t WHERE t.account_id=a.id
+                                                            ORDER BY tag)) AS tags, a.source,
                       (SELECT COUNT(*) FROM encounters e WHERE e.account_id=a.id) AS encounters,
                       EXISTS(SELECT 1 FROM latest_list l WHERE l.account_id=a.id) AS in_latest,
                       (SELECT l.pos FROM latest_list l WHERE l.account_id=a.id) AS pos,
                       f.relation AS relation
-               FROM accounts a LEFT JOIN people p ON p.id=a.person_id
+               FROM accounts a
                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?"""
         args: list = [owner]
         if search.strip():
             like = f"%{search.strip().casefold()}%"
             q += (" WHERE a.gamertag_key LIKE ? OR IFNULL(a.xuid,'') LIKE ?"
-                  " OR IFNULL(p.name,'') LIKE ? COLLATE NOCASE")
+                  " OR EXISTS(SELECT 1 FROM tags t WHERE t.account_id=a.id AND t.tag LIKE ?)")
             args += [like, like, like]
         q += " ORDER BY a.last_seen DESC, pos IS NULL, pos ASC, a.id DESC"
         with self.lock:
@@ -302,38 +313,57 @@ class Database:
                 "SELECT observed_at, source FROM encounters WHERE account_id=? ORDER BY observed_at DESC",
                 (account_id,)).fetchall()
 
-    # ---- people (manual groups) ----
-    def group_accounts(self, account_ids: List[int], name: str) -> int:
-        name = name.strip()
-        if not name or not account_ids:
-            raise ValueError("A name and at least one account are required")
-        with self.lock, self.conn:
-            row = self.conn.execute("SELECT id FROM people WHERE name=? COLLATE NOCASE", (name,)).fetchone()
-            pid = row[0] if row else self.conn.execute(
-                "INSERT INTO people(name,created_at) VALUES(?,?)", (name, int(time.time()))).lastrowid
-            self.conn.executemany("UPDATE accounts SET person_id=? WHERE id=?",
-                                  [(pid, a) for a in account_ids])
-        return pid
+    # ---- tags (manual labels; never applied automatically) ----
+    @staticmethod
+    def _clean_tag(tag: str) -> str:
+        return " ".join(tag.replace(",", " ").split())[:40]
 
-    def ungroup_accounts(self, account_ids: List[int]) -> None:
+    def add_tag(self, account_ids: List[int], tag: str) -> None:
+        tag = self._clean_tag(tag)
+        if not tag or not account_ids:
+            raise ValueError("A tag and at least one account are required")
         with self.lock, self.conn:
-            self.conn.executemany("UPDATE accounts SET person_id=NULL WHERE id=?",
-                                  [(a,) for a in account_ids])
-            self.conn.execute("DELETE FROM people WHERE id NOT IN "
-                              "(SELECT person_id FROM accounts WHERE person_id IS NOT NULL)")
+            self.conn.executemany("INSERT OR IGNORE INTO tags(account_id, tag) VALUES(?,?)",
+                                  [(a, tag) for a in account_ids])
+
+    def remove_tag(self, account_ids: List[int], tag: str) -> None:
+        with self.lock, self.conn:
+            self.conn.executemany("DELETE FROM tags WHERE account_id=? AND tag=?", [(a, tag) for a in account_ids])
+
+    def all_tags(self) -> List[str]:
+        with self.lock:
+            return [r[0] for r in self.conn.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")]
+
+    def tags_for(self, account_ids: List[int]) -> List[str]:
+        if not account_ids:
+            return []
+        with self.lock:
+            marks = ",".join("?" * len(account_ids))
+            return [r[0] for r in self.conn.execute(
+                f"SELECT DISTINCT tag FROM tags WHERE account_id IN ({marks}) ORDER BY tag", account_ids)]
+
+    def encounters_for_many(self, account_ids: List[int], limit: int = 2000) -> List[sqlite3.Row]:
+        if not account_ids:
+            return []
+        with self.lock:
+            marks = ",".join("?" * len(account_ids))
+            return self.conn.execute(
+                f"SELECT a.gamertag, e.observed_at, e.source FROM encounters e JOIN accounts a ON a.id=e.account_id "
+                f"WHERE e.account_id IN ({marks}) ORDER BY e.observed_at DESC, e.id DESC LIMIT ?",
+                [*account_ids, limit]).fetchall()
 
     # ---- export ----
     def export(self, path: Path) -> None:
         path = Path(path)
         rows = self.list_accounts()
         if path.suffix.lower() == ".json":
-            data = [{k: r[k] for k in ("xuid", "gamertag", "person", "first_seen", "last_seen", "source")}
+            data = [{k: r[k] for k in ("xuid", "gamertag", "tags", "first_seen", "last_seen", "source")}
                     | {"encounters": [dict(e) for e in self.encounters_for(r["id"])]} for r in rows]
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         else:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["gamertag", "xuid", "person", "first_seen", "last_seen", "source", "encounters"])
+                w.writerow(["gamertag", "xuid", "tags", "first_seen", "last_seen", "source", "encounters"])
                 for r in rows:
-                    w.writerow([r["gamertag"], r["xuid"] or "", r["person"] or "", r["first_seen"],
+                    w.writerow([r["gamertag"], r["xuid"] or "", r["tags"] or "", r["first_seen"],
                                 r["last_seen"], r["source"], r["encounters"]])

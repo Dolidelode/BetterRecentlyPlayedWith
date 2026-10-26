@@ -13,7 +13,7 @@ from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, Provi
                         lookup_gamertag)
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
-from .themes import THEMES, clamp, icon_path, palette
+from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
 
 MIN_INTERVAL = 30
 
@@ -44,7 +44,6 @@ class App:
         self.root.after(200, self._poll)
         self._schedule()
         self._schedule_live(15_000)
-        self.reload_live()
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         if db.get_setting("auto_update_check", "1") == "1":
@@ -88,7 +87,6 @@ class App:
         if hasattr(self, "tree"):
             self.tree.tag_configure("friend", background=P["friend"])
             self.tree.tag_configure("odd", background=P["stripe"])
-            self.live_tree.tag_configure("friend", background=P["friend"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
             self.legend.configure(bg=P["friend"], fg=FG)
 
@@ -150,11 +148,12 @@ class App:
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
         self._refresh_accounts()
 
-        self.nb = ttk.Notebook(r)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=(4, 0))
-        self.players_tab, self.live_tab = ttk.Frame(self.nb), ttk.Frame(self.nb)
-        self.nb.add(self.players_tab, text="Players")
-        self.nb.add(self.live_tab, text="Live now")
+        self.players_tab = ttk.Frame(r)
+        self.players_tab.pack(fill="both", expand=True)
+        try:
+            self.twitch_img = tk.PhotoImage(file=str(twitch_icon_path()))
+        except tk.TclError:
+            self.twitch_img = tk.PhotoImage(width=1, height=1)   # missing asset must never stop the app
 
         bar2 = ttk.Frame(self.players_tab)
         bar2.pack(fill="x", padx=8, pady=4)
@@ -165,13 +164,15 @@ class App:
         ttk.Button(bar2, text="Import...", command=self.import_dialog).pack(side="left", padx=4)
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
-        cols = ("gamertag", "xuid", "person", "last_seen", "origin", "current")
-        self.tree = ttk.Treeview(self.players_tab, columns=cols, show="headings", selectmode="extended")
-        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)",
+        cols = ("gamertag", "xuid", "tags", "last_seen", "origin", "current")
+        self.tree = ttk.Treeview(self.players_tab, columns=cols, show="tree headings", selectmode="extended")
+        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "tags": "Tags",
                            "last_seen": "Last seen by app", "origin": "Source", "current": "Xbox list #"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
-        for c, w in (("gamertag", 190), ("xuid", 150), ("person", 140), ("last_seen", 130), ("origin", 70),
-                     ("current", 85)):
+        self.tree.column("#0", width=34, minwidth=34, stretch=False, anchor="center")  # Twitch icon, only when live
+        self.tree.heading("#0", text="")
+        for c, w in (("gamertag", 180), ("xuid", 140), ("tags", 140), ("last_seen", 125), ("origin", 60),
+                     ("current", 100)):
             self.tree.heading(c, command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=w, anchor="w")
         self._update_headings()
@@ -188,46 +189,23 @@ class App:
         bar3 = ttk.Frame(self.players_tab)
         bar3.pack(fill="x", padx=8, pady=4)
         ttk.Button(bar3, text="Open SOTREP", command=self.open_selected).pack(side="left")
-        ttk.Button(bar3, text="Group as one person...", command=self.group).pack(side="left", padx=4)
-        ttk.Button(bar3, text="Ungroup", command=self.ungroup).pack(side="left")
+        ttk.Button(bar3, text="Tag...", command=self.tag_selected).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Remove tag...", command=self.untag_selected).pack(side="left")
+        ttk.Button(bar3, text="Encounters...", command=self.encounters_dialog).pack(side="left", padx=4)
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
         legend.pack(side="right", padx=(0, 10))
         self.legend = legend
-
-        self._build_live_tab()
+        self.live_status = tk.StringVar(value="")
+        ttk.Label(bar3, image=self.twitch_img, text=" live on Twitch", compound="left",
+                  style="Hint.TLabel").pack(side="right", padx=(0, 10))
 
         self.status = tk.StringVar()
         self.status_lbl = ttk.Label(r, textvariable=self.status, anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=(0, 8))
         self._update_pause_label()
         self.set_status("Ready. Add an OpenXBL account or use Import to add players.")
-
-    def _build_live_tab(self):
-        lt = self.live_tab
-        top = ttk.Frame(lt)
-        top.pack(fill="x", padx=8, pady=(8, 4))
-        ttk.Button(top, text="Check now", command=self.live_check_now).pack(side="left")
-        ttk.Button(top, text="Open SOTREP", command=self.live_open).pack(side="left", padx=4)
-        self.live_status = tk.StringVar(value="Not checked yet.")
-        ttk.Label(top, textvariable=self.live_status, style="Hint.TLabel").pack(side="left", padx=10)
-        ttk.Label(lt, style="Hint.TLabel", wraplength=740, justify="left", text=(
-            "A player is listed only when Xbox itself reports an active Twitch broadcast for that exact account "
-            "(no name guessing). Xbox does not share the Twitch channel or stream title, so none is shown. "
-            f"Automatic: every 5 minutes it checks the {LIVE_SCOPE} most recent players from Xbox's current list (not all are teammates). "
-            f"Each check costs one OpenXBL request (at most {HOURLY_BUDGET} per hour; offline players are only "
-            "re-checked every 3 hours).")).pack(fill="x", padx=10, pady=(0, 6))
-        cols = ("gamertag", "where", "viewers", "since", "checked")
-        self.live_tree = ttk.Treeview(lt, columns=cols, show="headings", selectmode="browse")
-        for c, t, w in (("gamertag", "Gamertag", 200), ("where", "Platform", 190), ("viewers", "Viewers", 80),
-                        ("since", "Live since", 140), ("checked", "Confirmed at", 140)):
-            self.live_tree.heading(c, text=t)
-            self.live_tree.column(c, width=w, anchor="w")
-        self.live_tree.pack(fill="both", expand=True, padx=8, pady=4)
-        self.live_tree.bind("<Double-1>", lambda e: self.live_open())
-        self.live_empty = ttk.Label(lt, text="Nobody is confirmed live right now.", style="Hint.TLabel")
-        self.live_empty.pack(pady=(0, 8))
 
     # ---- helpers ----
     def set_status(self, text, error=False):
@@ -240,7 +218,7 @@ class App:
     SORT_KEYS = {
         "gamertag": lambda a: a["gamertag"].casefold(),
         "xuid": lambda a: int(a["xuid"]) if a["xuid"] else -1,
-        "person": lambda a: (a["person"] or "").casefold(),
+        "tags": lambda a: (a["tags"] or "").casefold(),
         "last_seen": lambda a: (a["last_seen"], -(a["pos"] if a["pos"] is not None else 10 ** 9)),
         "origin": lambda a: a["source"],
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
@@ -262,13 +240,17 @@ class App:
                                     for i in self.tree.selection()}
         top = 0.0 if to_top else self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
-        rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()), key=self.SORT_KEYS[self.sort_col],
-                      reverse=self.sort_desc)
+        live_ids = {r["id"] for r in self.live.live_now()}   # Xbox-confirmed Twitch broadcasts, fresh only
+        rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()),
+                      key=self.SORT_KEYS[self.sort_col], reverse=self.sort_desc)
         for n, a in enumerate(rows):
-            iid = self.tree.insert("", "end", iid=str(a["id"]), tags=(("friend",) if a["relation"] == "Friend" else ()) + (("odd",) if n % 2 else ()), values=(
-                a["gamertag"], a["xuid"] or "", a["person"] or "", fmt_ts(a["last_seen"]),
-                "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
-                str(a["pos"] + 1) if a["pos"] is not None else ""))
+            friend = a["relation"] in ("Friend", "In your list")
+            iid = self.tree.insert(
+                "", "end", iid=str(a["id"]), image=self.twitch_img if a["id"] in live_ids else "",
+                tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()), values=(
+                    a["gamertag"], a["xuid"] or "", a["tags"] or "", fmt_ts(a["last_seen"]),
+                    "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
+                    str(a["pos"] + 1) if a["pos"] is not None else ""))
             if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
                 self.tree.selection_add(iid)
         self.tree.yview_moveto(top)  # a background refresh must not scroll the list back to the top
@@ -294,19 +276,77 @@ class App:
         for i in self.tree.selection():
             webbrowser.open(sotrep.profile_url(self.tree.set(i, "gamertag")))
 
-    def group(self):
+    def _ask_tag(self, title, prompt, values, editable):
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.configure(bg=self.pal["bg"])
+        win.transient(self.root)
+        ttk.Label(win, text=prompt).pack(padx=14, pady=(14, 6))
+        var = tk.StringVar()
+        box = ttk.Combobox(win, textvariable=var, values=values, width=32, state="normal" if editable else "readonly")
+        box.pack(padx=14)
+        box.focus_set()
+        result = {"v": None}
+
+        def ok(_e=None):
+            result["v"] = var.get().strip()
+            win.destroy()
+
+        row = ttk.Frame(win)
+        row.pack(pady=12)
+        ttk.Button(row, text="OK", command=ok).pack(side="left", padx=4)
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="left", padx=4)
+        win.bind("<Return>", ok)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.grab_set()
+        self.root.wait_window(win)
+        return result["v"] or None
+
+    def tag_selected(self):
         ids = self._selected_ids()
-        if len(ids) < 1:
-            return messagebox.showinfo("Group", "Select one or more accounts first.")
-        name = simpledialog.askstring("Group accounts", "Name of the person these accounts belong to:",
-                                      parent=self.root)
-        if name and name.strip():
-            self.db.group_accounts(ids, name)
+        if not ids:
+            return messagebox.showinfo("Tag", "Select one or more players first.")
+        tag = self._ask_tag("Tag players", f"Tag {len(ids)} selected player(s) with (pick one or type a new tag):",
+                            self.db.all_tags(), True)
+        if tag:
+            self.db.add_tag(ids, tag)
             self.reload()
 
-    def ungroup(self):
-        self.db.ungroup_accounts(self._selected_ids())
-        self.reload()
+    def untag_selected(self):
+        ids = self._selected_ids()
+        have = self.db.tags_for(ids)
+        if not ids or not have:
+            return messagebox.showinfo("Remove tag", "Select players that have a tag first.")
+        tag = self._ask_tag("Remove tag", "Remove which tag from the selected player(s)?", have, False)
+        if tag:
+            self.db.remove_tag(ids, tag)
+            self.reload()
+
+    def encounters_dialog(self):
+        ids = self._selected_ids()
+        if not ids:
+            return messagebox.showinfo("Encounters", "Select one or more players first.")
+        rows = self.db.encounters_for_many(ids)
+        win = tk.Toplevel(self.root)
+        win.title(f"Encounters ({len(rows)} for {len(ids)} player(s))")
+        win.configure(bg=self.pal["bg"])
+        win.geometry("520x380")
+        ttk.Label(win, style="Hint.TLabel", wraplength=480, text=(
+            "'When' is the time this app saw the player. Xbox does not provide real encounter times, and a "
+            "player is recorded again only after leaving and re-entering Xbox's recent list.")
+        ).pack(fill="x", padx=10, pady=(10, 4))
+        tv = ttk.Treeview(win, columns=("player", "when", "source"), show="headings")
+        for c, t, w in (("player", "Player", 190), ("when", "When", 150), ("source", "Source", 90)):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="w")
+        sb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y", pady=8, padx=(0, 8))
+        tv.pack(fill="both", expand=True, padx=(10, 0), pady=8)
+        tv.tag_configure("odd", background=self.pal["stripe"])
+        for n, r in enumerate(rows):
+            tv.insert("", "end", tags=("odd",) if n % 2 else (), values=(
+                r["gamertag"], fmt_ts(r["observed_at"]), "Live" if r["source"] in ("xbox-live", "openxbl") else "Import"))
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -383,7 +423,7 @@ class App:
         self.to_top_after_sync = True
         self.reload(to_top=True)
         self.set_status(f"Switched to {self.xkey.active()}. Refreshing...")
-        self.refresh_now()
+        self.refresh_now(manual=True)
 
     def remove_account(self):
         name = self.xkey.active()
@@ -393,12 +433,15 @@ class App:
             self._refresh_accounts()
             self.set_status(f"Removed {name}.")
 
-    def refresh_now(self):
+    def refresh_now(self, manual=True):
         prov = self._provider()
         if prov is None:
             return self.set_status("Not connected. Use 'Add account...', or use Import.", error=True)
+        prov.force_friends = manual
         who = self.xkey.active()
         self.set_status(f"Refreshing as {who}...")
+        if manual:
+            self.live_check_now()
         self.sync.run_async(prov, lambda out: self.q.put(("sync", out)))
 
     def _schedule(self):
@@ -412,7 +455,7 @@ class App:
     def _tick(self):
         self.after_id = None
         if self._provider():
-            self.refresh_now()
+            self.refresh_now(manual=False)
         self._schedule()
 
     def _finish(self, out: "SyncOutcome | None", imported=False):
@@ -437,8 +480,8 @@ class App:
                     msg, err = val
                     self.live_busy = False
                     done, total = self.live.coverage()
-                    self.live_status.set(f"{msg}  Players checked so far: {done} of {total}.")
-                    self.reload_live()
+                    self.live_status.set(f"Live check: {done} of {total} recent players checked. {msg}")
+                    self.reload()          # shows or removes the Twitch icons
                 elif kind == "acct_added":
                     name = self.xkey.add(*val)
                     self._refresh_accounts()
@@ -462,13 +505,9 @@ class App:
 
     # ---- Live now ----
     def live_check_now(self):
-        if self.live_busy:
-            return
-        if not self.xkey.get():
-            self.live_status.set("Add an OpenXBL account first.")
+        if self.live_busy or not self.xkey.get():
             return
         self.live_busy = True
-        self.live_status.set("Checking...")
 
         def work():
             try:
@@ -479,24 +518,6 @@ class App:
                 self.q.put(("live", (f"Unexpected error: {e}", True)))
 
         threading.Thread(target=work, daemon=True).start()
-
-    def reload_live(self):
-        self.live_tree.delete(*self.live_tree.get_children())
-        rows = self.live.live_now()
-        rel = self.db.friend_relations(self.xkey.active())
-        for r in rows:
-            self.live_tree.insert("", "end", iid=str(r["id"]), tags=("friend",) if rel.get(r["xuid"]) == "Friend" else (),
-                                  values=(
-                r["gamertag"], "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
-                fmt_ts(r["started"]), fmt_ts(r["checked_at"])))
-        if rows:
-            self.live_empty.pack_forget()
-        elif not self.live_empty.winfo_ismapped():
-            self.live_empty.pack(pady=(0, 8))
-
-    def live_open(self):
-        for i in self.live_tree.selection():
-            webbrowser.open(sotrep.profile_url(self.live_tree.set(i, "gamertag")))
 
     def _schedule_live(self, delay_ms=300_000):
         if self.live_after_id:

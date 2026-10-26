@@ -23,6 +23,10 @@ def asset_dir() -> Path:
     return Path(base) / "assets" if base else Path(__file__).resolve().parent.parent / "assets"
 
 
+def twitch_icon_path() -> Path:
+    return asset_dir() / "twitch_live.png"
+
+
 def icon_path(n: int) -> Path:
     return asset_dir() / "icons" / f"theme{n}.png"
 

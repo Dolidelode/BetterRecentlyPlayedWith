@@ -9,19 +9,19 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | Feature | State |
 |---|---|
 | Local history (SQLite), search, sorting, unique count, export CSV/JSON | Works, tested |
-| Group several accounts under one person (manual only) | Works, tested |
+| Tags (your own labels on players, searchable) and an Encounters view for one or several selected players | Works, tested |
 | **Import** gamertags (paste/file) | Works, tested. Marked "Import" in the list |
 | **Live** sync via OpenXBL | Uses OpenXBL's documented `GET /v2/recent-players` (third-party service, free key, 150 requests/hour). Parsed from its published spec; **not yet tested against a real account** |
 | What OpenXBL's list contains | Your **whole** Xbox Recently played with list (all games), without game names or times. The app can't filter to Sea of Thieves; "Last seen by app" is when the app first saw the player, and "Xbox list #" is the position in Xbox's list (1 = top, presumably the most recent). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
 | Friend highlight | Rows of players who are your friends (you follow each other) get a different colour. Uses your OpenXBL friends list (1 extra request per 30 min), matched by XUID, never by name. Switching account jumps back to the top of the list |
-| **Live now** tab | Experimental. Lists players whose **Xbox presence** reports an active Twitch broadcast. It automatically checks the 20 most recent players in Xbox's current list (one OpenXBL request each, max 30 per hour; OpenXBL has no batch presence). No Twitch channel or stream title is available without extra Twitch setup, so none is shown. Not yet seen working on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
+| **Twitch icon** | Experimental. A Twitch icon appears on a player's row only while **Xbox itself** reports an active Twitch broadcast for that account. It checks the 20 most recent players automatically (one OpenXBL request each, max 30 per hour). No channel link or stream title is available, so none is shown. Not yet seen on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
 | SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
 | Update check | Notifies you and opens the GitHub release page. No automatic install |
 
 ## Using it
 1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
 2. **Import...** to paste gamertags, or **Add account...** for live sync (below).
-3. Double-click a player (or **Open SOTREP**). Select several rows and **Group as one person...** for alt accounts.
+3. Double-click a player (or **Open SOTREP**). Select several rows and **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically), and **Encounters...** to see every recorded encounter of the selected players together.
 4. Leave it open: it refreshes every 60 s (changeable, minimum 30 s; **Pause** any time).
 
 Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `openxbl_keys.json`), so updating or moving the exe never touches it.
@@ -33,8 +33,8 @@ Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups
 
 OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
 
-## Live now
-The second tab shows players from your history that Xbox reports as broadcasting on Twitch (viewers and start time come from Xbox). Nothing to set up beyond the OpenXBL key. It runs by itself every 5 minutes, only for the 20 most recent players in Xbox's current list, never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
+## Twitch icon
+A small Twitch icon on a row means Xbox reports that player as broadcasting on Twitch right now. It runs by itself every 5 minutes for the 20 most recent players in Xbox's current list, never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
 
 ## Themes and icon
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.

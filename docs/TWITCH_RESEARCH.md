@@ -72,7 +72,7 @@ account linking, no Twitch API key, no hosted backend, no secrets in the exe, no
 | No false matches | Yes (nothing is inferred from names) |
 
 ## What was implemented
-A **Live now** tab that checks only the top `LIVE_SCOPE = 20` players of Xbox's current recent-players list (not the
+A background check (shown as a Twitch icon on the player's row; there is no separate tab) that checks only the top `LIVE_SCOPE = 20` players of Xbox's current recent-players list (not the
 whole history), within a budget of `HOURLY_BUDGET = 30` single-player presence requests per hour (20% of the free
 tier). Never-checked players first, then stale ones (online players re-checked after 10 min, offline after 3 h). Results are cached in SQLite (`live_status`). A player is shown
 only if the fresh (<20 min) presence record contains a broadcast whose provider is Twitch; otherwise nothing is
