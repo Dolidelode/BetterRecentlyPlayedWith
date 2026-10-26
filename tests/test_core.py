@@ -245,8 +245,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     monkeypatch.setenv("BRPW_DATA_DIR", str(tmp_path))
     d.merge_players([Player("Old", "1")], "openxbl", True, now=100)
     d.merge_players([Player("New", "2"), Player("New2", "3")], "openxbl", True, now=200)
+    from brpw.providers import OpenXblKey
+    OpenXblKey(tmp_path / "openxbl_keys.json").add("Main", "k")
+    d.replace_friends("Main", {"2": "Friend", "3": "You follow"})
     app = ui.App(root, d)
     root.update()
+    tags = {app.tree.set(i, "gamertag"): app.tree.item(i, "tags") for i in app.tree.get_children()}
+    assert "friend" in tags["New"] and "friend" not in tags["New2"] and "friend" not in tags["Old"]
+    assert str(app.tree.tag_configure("friend", "background")) == app.pal["friend"]
     names = lambda: [app.tree.set(i, "gamertag") for i in app.tree.get_children()]
     assert names() == ["New", "New2", "Old"]          # Xbox list order first, then older history
     app.sort_by("last_seen")
@@ -255,12 +261,19 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert names() == ["Old", "New2", "New"]          # toggled: oldest first
     app.sort_by("gamertag")
     assert names() == ["New", "New2", "Old"]          # A-Z
+    app.refresh_now = lambda: None                    # no network in tests
+    app.tree.selection_set(app.tree.get_children()[0])
+    app.acct_var.set("Main")
+    app.switch_account()                               # switching accounts: back to the top, selection cleared
+    assert app.to_top_after_sync and not app.tree.selection() and app.tree.yview()[0] == 0.0
     app.set_theme(3)
+    assert str(app.tree.tag_configure("friend", "background")) == app.pal["friend"] != ""
     assert d.get_setting("theme") == "3" and app.pal["accent"] == "#e0a040" and app.pal["bg"] == "#2a1d12"
     app.set_theme(99)                                  # out of range falls back to the default
     assert app.theme == 8
     assert app.live_tree.winfo_exists() and app.live_empty.winfo_exists()
     app.reload_live()
+    app.xkey.remove("Main")                            # no key left: Live now must not start a worker
     app.live_check_now()                               # no key set: must not start a worker
     assert not app.live_busy
     app.on_close()

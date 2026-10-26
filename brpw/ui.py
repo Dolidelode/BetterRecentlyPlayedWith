@@ -36,6 +36,7 @@ class App:
         self.after_id = None
         self.live_after_id = None
         self.live_busy = False
+        self.to_top_after_sync = False
         self.live = LiveChecker(db, self.xkey)
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -85,8 +86,11 @@ class App:
         st.configure("Hint.TLabel", foreground=P["muted"])
         r.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         if hasattr(self, "tree"):
+            self.tree.tag_configure("friend", background=P["friend"])
             self.tree.tag_configure("odd", background=P["stripe"])
+            self.live_tree.tag_configure("friend", background=P["friend"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
+            self.legend.configure(bg=P["friend"], fg=FG)
 
     def _apply_icon(self):
         try:
@@ -161,16 +165,18 @@ class App:
         ttk.Button(bar2, text="Import...", command=self.import_dialog).pack(side="left", padx=4)
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
-        cols = ("gamertag", "xuid", "person", "friend", "last_seen", "origin", "current")
+        cols = ("gamertag", "xuid", "person", "last_seen", "origin", "current")
         self.tree = ttk.Treeview(self.players_tab, columns=cols, show="headings", selectmode="extended")
-        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)", "friend": "Friend?",
+        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)",
                            "last_seen": "Last seen by app", "origin": "Source", "current": "Xbox list #"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
-        for c, w in (("gamertag", 180), ("xuid", 140), ("person", 130), ("friend", 90), ("last_seen", 125),
-                     ("origin", 60), ("current", 80)):
+        for c, w in (("gamertag", 190), ("xuid", 150), ("person", 140), ("last_seen", 130), ("origin", 70),
+                     ("current", 85)):
             self.tree.heading(c, command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=w, anchor="w")
         self._update_headings()
+        # ttk: the tag created FIRST wins when a row has several, so "friend" must be created before "odd"
+        self.tree.tag_configure("friend", background=self.pal["friend"])
         self.tree.tag_configure("odd", background=self.pal["stripe"])
         sb = ttk.Scrollbar(self.players_tab, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -186,6 +192,9 @@ class App:
         ttk.Button(bar3, text="Ungroup", command=self.ungroup).pack(side="left")
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
+        legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
+        legend.pack(side="right", padx=(0, 10))
+        self.legend = legend
 
         self._build_live_tab()
 
@@ -209,10 +218,9 @@ class App:
             f"Automatic: every 5 minutes it checks the {LIVE_SCOPE} most recent players from Xbox's current list (not all are teammates). "
             f"Each check costs one OpenXBL request (at most {HOURLY_BUDGET} per hour; offline players are only "
             "re-checked every 3 hours).")).pack(fill="x", padx=10, pady=(0, 6))
-        cols = ("gamertag", "friend", "where", "viewers", "since", "checked")
+        cols = ("gamertag", "where", "viewers", "since", "checked")
         self.live_tree = ttk.Treeview(lt, columns=cols, show="headings", selectmode="browse")
-        for c, t, w in (("gamertag", "Gamertag", 190), ("friend", "Friend?", 90), ("where", "Platform", 180),
-                        ("viewers", "Viewers", 70),
+        for c, t, w in (("gamertag", "Gamertag", 200), ("where", "Platform", 190), ("viewers", "Viewers", 80),
                         ("since", "Live since", 140), ("checked", "Confirmed at", 140)):
             self.live_tree.heading(c, text=t)
             self.live_tree.column(c, width=w, anchor="w")
@@ -233,7 +241,6 @@ class App:
         "gamertag": lambda a: a["gamertag"].casefold(),
         "xuid": lambda a: int(a["xuid"]) if a["xuid"] else -1,
         "person": lambda a: (a["person"] or "").casefold(),
-        "friend": lambda a: ("Friend", "You follow", "Follows you", "In your list", "").index(a["relation"] or ""),
         "last_seen": lambda a: (a["last_seen"], -(a["pos"] if a["pos"] is not None else 10 ** 9)),
         "origin": lambda a: a["source"],
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
@@ -250,15 +257,16 @@ class App:
             arrow = (" ▼" if self.sort_desc else " ▲") if c == self.sort_col else ""
             self.tree.heading(c, text=t + arrow)
 
-    def reload(self):
-        sel = {self.tree.set(i, "xuid") + "|" + self.tree.set(i, "gamertag") for i in self.tree.selection()}
-        top = self.tree.yview()[0]
+    def reload(self, to_top=False):
+        sel = set() if to_top else {self.tree.set(i, "xuid") + "|" + self.tree.set(i, "gamertag")
+                                    for i in self.tree.selection()}
+        top = 0.0 if to_top else self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
         rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()), key=self.SORT_KEYS[self.sort_col],
                       reverse=self.sort_desc)
         for n, a in enumerate(rows):
-            iid = self.tree.insert("", "end", iid=str(a["id"]), tags=("odd",) if n % 2 else (), values=(
-                a["gamertag"], a["xuid"] or "", a["person"] or "", a["relation"] or "", fmt_ts(a["last_seen"]),
+            iid = self.tree.insert("", "end", iid=str(a["id"]), tags=(("friend",) if a["relation"] == "Friend" else ()) + (("odd",) if n % 2 else ()), values=(
+                a["gamertag"], a["xuid"] or "", a["person"] or "", fmt_ts(a["last_seen"]),
                 "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
                 str(a["pos"] + 1) if a["pos"] is not None else ""))
             if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
@@ -372,6 +380,8 @@ class App:
 
     def switch_account(self):
         self.xkey.set_active(self.acct_var.get())
+        self.to_top_after_sync = True
+        self.reload(to_top=True)
         self.set_status(f"Switched to {self.xkey.active()}. Refreshing...")
         self.refresh_now()
 
@@ -414,7 +424,8 @@ class App:
         else:
             msg = out.message + ("  -> check or re-add the account key." if out.reauth else "")
             self.set_status(f"Refresh failed (existing data kept): {msg}", error=True)
-        self.reload()
+        self.reload(to_top=self.to_top_after_sync)
+        self.to_top_after_sync = False
 
     def _poll(self):
         try:
@@ -474,8 +485,9 @@ class App:
         rows = self.live.live_now()
         rel = self.db.friend_relations(self.xkey.active())
         for r in rows:
-            self.live_tree.insert("", "end", iid=str(r["id"]), values=(
-                r["gamertag"], rel.get(r["xuid"], ""), "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
+            self.live_tree.insert("", "end", iid=str(r["id"]), tags=("friend",) if rel.get(r["xuid"]) == "Friend" else (),
+                                  values=(
+                r["gamertag"], "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
                 fmt_ts(r["started"]), fmt_ts(r["checked_at"])))
         if rows:
             self.live_empty.pack_forget()

@@ -44,4 +44,4 @@ def _mix(a: str, b: str, t: float) -> str:
 def palette(n: int) -> dict:
     name, accent, bg, panel, fg = THEMES[clamp(n) - 1]
     return {"name": name, "accent": accent, "bg": bg, "panel": panel, "fg": fg,
-            "head": _mix(panel, accent, 0.22), "stripe": _mix(panel, bg, 0.35), "muted": _mix(fg, bg, 0.45)}
+            "head": _mix(panel, accent, 0.22), "friend": _mix(panel, accent, 0.38), "stripe": _mix(panel, bg, 0.35), "muted": _mix(fg, bg, 0.45)}
