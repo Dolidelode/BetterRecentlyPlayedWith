@@ -639,3 +639,33 @@ def test_account_details_summary(db):
     d = db.account_details(ids, "Main")[0]
     assert d["gamertag"] == "NewName" and d["old_names"] == "OldName" and d["tags"] == "crew"
     assert d["relation"] == "Friend" and d["times"] == 1 and d["pos"] == 0 and d["state"] is None
+
+
+# ---- OpenXBL puts the real status in the body
+def test_openxbl_body_level_errors(monkeypatch, tmp_path):
+    from brpw import providers
+    limited = {"content": {"currentRequests": 128, "maxRequests": 60, "periodInSeconds": 300, "limitType": "Rate"}, "code": 429}
+    monkeypatch.setattr(providers, "http_json", lambda *a, **k: limited)
+    with pytest.raises(ProviderError) as ei:
+        providers.openxbl_json("https://x")
+    assert ei.value.code == 429 and "rate limiting" in str(ei.value) and "60 requests per 300 s" in str(ei.value)
+    for code in (401, 403):
+        monkeypatch.setattr(providers, "http_json", lambda *a, code=code, **k: {"content": {}, "code": code})
+        with pytest.raises(ProviderError) as ei:
+            providers.openxbl_json("https://x")
+        assert ei.value.reauth and ei.value.code == code
+    ok = {"content": {"people": []}, "code": 200}
+    monkeypatch.setattr(providers, "http_json", lambda *a, **k: ok)
+    assert providers.openxbl_json("https://x") is ok
+    # the whole chain: a rate-limited recent-players refresh says so, instead of "unexpected response"
+    monkeypatch.setattr(providers, "http_json", lambda *a, **k: limited)
+    keys = providers.OpenXblKey(tmp_path / "k.json")
+    keys.add("Main", "key")
+    with pytest.raises(ProviderError, match="rate limiting OpenXBL"):
+        providers.OpenXblProvider(keys).fetch()
+    # and the live check pauses instead of treating it as data
+    d = Database(tmp_path / "p.db")
+    d.merge_players([Player("A", "1")], "openxbl", True, now=100, owner="Main")
+    from brpw.live import LiveChecker
+    ck = LiveChecker(d, keys)
+    assert "pause" in ck.run_cycle() and ck.budget_left() == 0

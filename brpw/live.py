@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional
 
 from .db import Database
-from .providers import ProviderError, _iso_to_epoch, http_json
+from .providers import ProviderError, _iso_to_epoch, openxbl_json
 
 SUMMARY_URL = "https://api.xbl.io/v2/player/summary/"
 PRESENCE_URL = "https://api.xbl.io/v2/presence/"   # one player: carries the broadcast record
@@ -112,7 +112,7 @@ def _chunks(items: list, n: int):
 
 
 class LiveChecker:
-    def __init__(self, db: Database, key, http: Callable = http_json, now: Callable[[], float] = time.time,
+    def __init__(self, db: Database, key, http: Callable = openxbl_json, now: Callable[[], float] = time.time,
                  scope: int = LIVE_SCOPE):
         self.db, self.key, self.http, self.now, self.scope = db, key, http, now, scope
         self.spent: Deque[float] = deque()      # timestamps of requests in the last hour

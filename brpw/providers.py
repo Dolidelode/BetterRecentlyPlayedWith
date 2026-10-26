@@ -115,6 +115,28 @@ def http_json(url: str, data: Optional[dict] = None, headers: Optional[dict] = N
 OPENXBL_URL = "https://api.xbl.io/v2/recent-players"  # https://api.xbl.io/openapi.json
 
 
+def raise_for_body(payload):
+    """OpenXBL answers HTTP 200 and puts the real upstream status in the body ("code"). Seen for real: code 429 with
+    {currentRequests, maxRequests, periodInSeconds}. Turn 401/403/429 there into proper errors."""
+    if isinstance(payload, dict) and isinstance(payload.get("code"), int) and payload["code"] in (401, 403, 429):
+        code, c = payload["code"], payload.get("content")
+        if code == 429:
+            detail = ""
+            if isinstance(c, dict) and "maxRequests" in c and "periodInSeconds" in c:
+                detail = (f" (Xbox allows {c['maxRequests']} requests per {c['periodInSeconds']} s; "
+                          f"{c.get('currentRequests', '?')} were counted)")
+            err = ProviderError("Xbox is rate limiting OpenXBL right now" + detail + ". Wait a few minutes; the app retries by itself.")
+        else:
+            err = ProviderError("OpenXBL rejected the key.", reauth=True)
+        err.code = code
+        raise err
+    return payload
+
+
+def openxbl_json(url, data=None, headers=None, form=False):
+    return raise_for_body(http_json(url, data, headers, form))
+
+
 def _iso_to_epoch(s) -> Optional[int]:
     if not isinstance(s, str):
         return None
@@ -195,7 +217,7 @@ def parse_account_gamertag(payload) -> Optional[str]:
     return None
 
 
-def lookup_gamertag(key: str, http=http_json) -> Optional[str]:
+def lookup_gamertag(key: str, http=openxbl_json) -> Optional[str]:
     """Raises ProviderError if the key is rejected; returns None if the name can't be read."""
     try:
         return parse_account_gamertag(http(OPENXBL_ACCOUNT_URL, None, {"X-Authorization": key.strip()}))
@@ -317,7 +339,7 @@ class OpenXblProvider(RecentPlayersProvider):
     def owner(self) -> str:   # which Xbox account's list this is
         return self.key.active() or ""
 
-    def __init__(self, key: OpenXblKey, http=http_json):
+    def __init__(self, key: OpenXblKey, http=openxbl_json):
         self.key, self.http = key, http
 
     def fetch(self) -> List[Player]:
@@ -331,6 +353,8 @@ class OpenXblProvider(RecentPlayersProvider):
             if code == 401:
                 raise ProviderError("OpenXBL rejected the key. Check it or sign in at xbl.io again.", reauth=True)
             if code == 429:
+                if str(e).startswith("Xbox is rate limiting"):
+                    raise                                     # the body-level 429 already explains itself
                 raise ProviderError("OpenXBL rate limit reached (free tier: 150 requests/hour). Try a longer interval.")
             raise
         self.notes = openxbl_stats(payload)
