@@ -1,0 +1,50 @@
+# Better Recently Played With
+
+A small Windows app that keeps a local history of your Xbox **Recently played with** players and opens
+their [SOTREP](https://www.sotrep.com/) page with one click. No server, no installer, no Python needed.
+
+> **Status: early (v0.1.0).** Read "What works and what doesn't" before relying on it.
+
+## What works and what doesn't
+| Feature | State |
+|---|---|
+| Local history (SQLite), search, sorting, unique count, export CSV/JSON | Works, tested |
+| Group several accounts under one person (manual only) | Works, tested |
+| **Import** gamertags (paste/file) | Works, tested. Marked "Import" in the list |
+| **Live** sync via OpenXBL | Uses OpenXBL's documented `GET /v2/recent-players` (third-party service, free key, 150 requests/hour). Parsed from its published spec; **not yet tested against a real account** |
+| What OpenXBL's list contains | Your **whole** Xbox Recently played with list (all games), without game names or times. The app can't filter to Sea of Thieves; "Last seen by app" is when the app first saw the player, and "Xbox list #" is the position in Xbox's list (1 = top, presumably the most recent). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
+| SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
+| Update check | Notifies you and opens the GitHub release page. No automatic install |
+
+## Using it
+1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
+2. **Import...** to paste gamertags, or **Add account...** for live sync (below).
+3. Double-click a player (or **Open SOTREP**). Select several rows and **Group as one person...** for alt accounts.
+4. Leave it open: it refreshes every 60 s (changeable, minimum 30 s; **Pause** any time).
+
+Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `openxbl_keys.json`), so updating or moving the exe never touches it.
+
+### Connecting (easiest: OpenXBL)
+1. Click **Add account...**, sign in at <https://xbl.io> with your Microsoft account (phone verification), copy your API key from the dashboard.
+2. Paste it into the app. The app looks up the gamertag and shows it under **Syncing as Xbox account**. Keys are stored in `openxbl_keys.json` in your app-data folder, never in the database.
+3. Several accounts: **Add account...** again for each one, pick the active one in the drop-down (switching refreshes at once) or **Remove** it. All accounts feed the same player history.
+
+OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
+
+## Themes and icon
+Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
+
+## Privacy
+Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` (update check) and opens `sotrep.com` links in your browser. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
+
+## Development
+```
+python -m pytest -q        # tests
+python run.py              # run from source
+./build.ps1                # build dist\BetterRecentlyPlayedWith.exe
+```
+CI (`.github/workflows/build.yml`) tests and builds on Windows; pushing a tag `vX.Y.Z` attaches the exe and a SHA-256 file to a release. The hash comes from the same place as the exe, so it detects corruption, not tampering; code signing is not set up yet.
+
+Publish: `git init && git add . && git commit -m "Initial version" && git branch -M main && git remote add origin https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith.git && git push -u origin main`
+
+License: MIT (simple, permissive). Not affiliated with Microsoft, Xbox, Rare or SOTREP.
