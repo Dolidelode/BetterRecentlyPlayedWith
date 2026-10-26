@@ -259,8 +259,12 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert d.get_setting("theme") == "3" and app.pal["accent"] == "#e0a040" and app.pal["bg"] == "#2a1d12"
     app.set_theme(99)                                  # out of range falls back to the default
     assert app.theme == 8
+    assert app.live_tree.winfo_exists() and app.live_empty.winfo_exists()
+    app.reload_live()
+    app.live_check_now()                               # no key set: must not start a worker
+    assert not app.live_busy
     app.on_close()
-    assert app.closing and app.after_id is None
+    assert app.closing and app.after_id is None and app.live_after_id is None
 
 
 # ---- OpenXBL

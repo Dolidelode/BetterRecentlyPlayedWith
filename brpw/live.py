@@ -1,0 +1,163 @@
+"""Live Now: Xbox-confirmed Twitch broadcasting for players in the local history.
+
+What is (and is not) possible is documented in docs/TWITCH_RESEARCH.md. In short:
+* OpenXBL has no batch presence (verified: comma-separated XUIDs -> SerializationError), so each player
+  costs one request. A small hourly budget is spent on the most useful players, with a per-player cache.
+* "Live" is only reported when Xbox's own presence record for that XUID contains a broadcast whose provider
+  is Twitch. Nothing is guessed from names. Xbox does not give the Twitch channel or stream title, so none
+  is shown.
+"""
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Callable, Deque, List, Optional
+
+from .db import Database
+from .providers import ProviderError, http_json
+
+PRESENCE_URL = "https://api.xbl.io/v2/presence/"
+HOURLY_BUDGET = 30            # presence requests per hour (20% of the free OpenXBL tier of 150)
+ONLINE_TTL = 10 * 60          # re-check a player who was online after 10 min
+OFFLINE_TTL = 3 * 3600        # ... and an offline one after 3 h
+LIVE_MAX_AGE = 20 * 60        # a "live" result older than this is no longer shown as live
+
+
+@dataclass
+class Presence:
+    state: str
+    twitch: bool = False
+    viewers: Optional[int] = None
+    started: Optional[int] = None
+    broadcast_id: Optional[str] = None
+
+
+def _find_broadcasts(node):
+    """Dicts stored under any key containing 'broadcast' (shape in REST responses is not documented
+    by Microsoft, so this looks for the documented field names rather than assuming a path)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if "broadcast" in k.lower() and isinstance(v, dict):
+                yield v
+            elif "broadcast" in k.lower() and isinstance(v, list):
+                for i in v:
+                    if isinstance(i, dict):
+                        yield i
+            yield from _find_broadcasts(v)
+    elif isinstance(node, list):
+        for i in node:
+            yield from _find_broadcasts(i)
+
+
+def parse_presence(payload) -> Presence:
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, dict) or "state" not in content:
+        raise ProviderError("Unexpected presence response from OpenXBL.")
+    p = Presence(state=str(content["state"]))
+    for b in _find_broadcasts(content):
+        if "twitch" in str(b.get("provider", "")).casefold():
+            p.twitch = True
+            v = b.get("viewerCount", b.get("viewers"))
+            p.viewers = int(v) if isinstance(v, (int, float)) else None
+            p.broadcast_id = str(b.get("broadcastId", b.get("id", ""))) or None
+            from .providers import _iso_to_epoch
+            s = b.get("startTime", b.get("started"))
+            p.started = int(s) if isinstance(s, (int, float)) else _iso_to_epoch(s)
+            break
+    return p
+
+
+def migrate_live_table(c) -> None:
+    c.execute("""CREATE TABLE live_status(
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        checked_at INTEGER NOT NULL, state TEXT NOT NULL, twitch INTEGER NOT NULL DEFAULT 0,
+        viewers INTEGER, started INTEGER, broadcast_id TEXT)""")
+
+
+class LiveChecker:
+    def __init__(self, db: Database, key, http: Callable = http_json, now: Callable[[], float] = time.time):
+        self.db, self.key, self.http, self.now = db, key, http, now
+        self.spent: Deque[float] = deque()      # timestamps of requests in the last hour
+        self.blocked_until = 0.0                # after a 429
+        self.last_error: Optional[str] = None
+
+    # ---- budget ----
+    def budget_left(self) -> int:
+        t = self.now()
+        while self.spent and self.spent[0] < t - 3600:
+            self.spent.popleft()
+        return 0 if t < self.blocked_until else max(0, HOURLY_BUDGET - len(self.spent))
+
+    # ---- candidates ----
+    def candidates(self, limit: int) -> List[dict]:
+        """Accounts due for a check, most useful first: players in Xbox's current list (by position),
+        then by recency. Online players are re-checked sooner than offline ones."""
+        t = int(self.now())
+        with self.db.lock:
+            rows = self.db.conn.execute("""
+            SELECT a.id, a.xuid, l.pos, a.last_seen, s.checked_at, s.state
+            FROM accounts a
+            LEFT JOIN latest_list l ON l.account_id = a.id
+            LEFT JOIN live_status s ON s.account_id = a.id
+            WHERE a.xuid IS NOT NULL
+            ORDER BY (l.pos IS NULL), l.pos, a.last_seen DESC""").fetchall()
+        due = []
+        for r in rows:
+            ttl = ONLINE_TTL if (r["state"] or "").casefold() == "online" else OFFLINE_TTL
+            if r["checked_at"] is None or t - r["checked_at"] >= ttl:
+                due.append(dict(r))
+        # never-checked players first (they cost the same and tell us the most), then stalest
+        due.sort(key=lambda r: (r["checked_at"] is not None, r["checked_at"] or 0))
+        return due[:limit]
+
+    # ---- one cycle ----
+    def run_cycle(self, max_requests: int = 3) -> str:
+        """Spend at most max_requests (and never more than the hourly budget). Returns a status line."""
+        key = self.key.get()
+        if not key:
+            raise ProviderError("No OpenXBL key set.", reauth=True)
+        done = 0
+        for cand in self.candidates(min(max_requests, self.budget_left())):
+            try:
+                payload = self.http(PRESENCE_URL + cand["xuid"], None, {"X-Authorization": key})
+                self.spent.append(self.now())
+                pres = parse_presence(payload)
+            except ProviderError as e:
+                code = getattr(e, "code", 0)
+                if code == 429:
+                    self.blocked_until = self.now() + 15 * 60
+                    self.last_error = "OpenXBL rate limit reached; Live Now pauses for 15 minutes."
+                    return self.last_error
+                if code in (401, 403):
+                    raise ProviderError("OpenXBL rejected the key.", reauth=True)
+                self.spent.append(self.now())
+                self.last_error = str(e)
+                continue
+            self._store(cand["id"], pres)
+            done += 1
+        self.last_error = None
+        return f"Checked {done} player(s); {self.budget_left()} of {HOURLY_BUDGET} hourly requests left."
+
+    def _store(self, account_id: int, p: Presence) -> None:
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute(
+                "INSERT OR REPLACE INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (account_id, int(self.now()), p.state, int(p.twitch), p.viewers, p.started, p.broadcast_id))
+
+    # ---- reading results ----
+    def live_now(self) -> list:
+        """Only confirmed, fresh Xbox broadcast records with provider Twitch."""
+        t = int(self.now())
+        with self.db.lock:
+            return self.db.conn.execute(
+                """SELECT a.id, a.gamertag, a.xuid, s.viewers, s.started, s.checked_at, s.broadcast_id
+                   FROM live_status s JOIN accounts a ON a.id = s.account_id
+                   WHERE s.twitch = 1 AND s.checked_at >= ? ORDER BY s.viewers IS NULL, s.viewers DESC""",
+                (t - LIVE_MAX_AGE,)).fetchall()
+
+    def coverage(self) -> tuple:
+        """(players checked at least once, players with an XUID)."""
+        with self.db.lock:
+            c = self.db.conn
+            return (c.execute("SELECT COUNT(*) FROM live_status").fetchone()[0],
+                    c.execute("SELECT COUNT(*) FROM accounts WHERE xuid IS NOT NULL").fetchone()[0])

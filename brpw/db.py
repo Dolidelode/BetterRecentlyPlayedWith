@@ -71,7 +71,12 @@ def _m2(c: sqlite3.Connection) -> None:
     c.execute("ALTER TABLE latest_list ADD COLUMN pos INTEGER")  # position in the source's list (0 = first)
 
 
-MIGRATIONS = [_m1, _m2]  # index i migrates user_version i -> i+1
+def _m3(c: sqlite3.Connection) -> None:
+    from .live import migrate_live_table
+    migrate_live_table(c)
+
+
+MIGRATIONS = [_m1, _m2, _m3]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

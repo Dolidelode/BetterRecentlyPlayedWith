@@ -11,6 +11,7 @@ from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         lookup_gamertag)
+from .live import HOURLY_BUDGET, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette
 
@@ -33,11 +34,16 @@ class App:
         self.pal = palette(self.theme)
         self.status_error = False
         self.after_id = None
+        self.live_after_id = None
+        self.live_busy = False
+        self.live = LiveChecker(db, self.xkey)
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.reload()
         self.root.after(200, self._poll)
         self._schedule()
+        self._schedule_live(15_000)
+        self.reload_live()
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         if db.get_setting("auto_update_check", "1") == "1":
@@ -70,6 +76,12 @@ class App:
         r.option_add("*TCombobox*Listbox.foreground", FG)
         r.option_add("*TCombobox*Listbox.selectBackground", acc)
         st.configure("TCheckbutton", background=BG, foreground=FG)
+        st.configure("TNotebook", background=BG, borderwidth=0)
+        st.configure("TNotebook.Tab", background=PANEL, foreground=FG, padding=(16, 6), borderwidth=0)
+        st.map("TNotebook.Tab", background=[("selected", HEAD), ("!selected", PANEL)],
+               foreground=[("selected", "#ffffff"), ("!selected", P["muted"])],
+               padding=[("selected", (16, 8)), ("!selected", (16, 6))],
+               lightcolor=[("selected", acc), ("!selected", PANEL)], bordercolor=[("selected", acc), ("!selected", PANEL)])
         st.configure("Hint.TLabel", foreground=P["muted"])
         r.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         if hasattr(self, "tree"):
@@ -134,7 +146,13 @@ class App:
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
         self._refresh_accounts()
 
-        bar2 = ttk.Frame(r)
+        self.nb = ttk.Notebook(r)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=(4, 0))
+        self.players_tab, self.live_tab = ttk.Frame(self.nb), ttk.Frame(self.nb)
+        self.nb.add(self.players_tab, text="Players")
+        self.nb.add(self.live_tab, text="Live now")
+
+        bar2 = ttk.Frame(self.players_tab)
         bar2.pack(fill="x", padx=8, pady=4)
         ttk.Label(bar2, text="Search").pack(side="left")
         self.search = tk.StringVar()
@@ -144,7 +162,7 @@ class App:
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
         cols = ("gamertag", "xuid", "person", "last_seen", "origin", "current")
-        self.tree = ttk.Treeview(r, columns=cols, show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(self.players_tab, columns=cols, show="headings", selectmode="extended")
         self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)",
                            "last_seen": "Last seen by app", "origin": "Source", "current": "Xbox list #"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
@@ -154,14 +172,14 @@ class App:
             self.tree.column(c, width=w, anchor="w")
         self._update_headings()
         self.tree.tag_configure("odd", background=self.pal["stripe"])
-        sb = ttk.Scrollbar(r, orient="vertical", command=self.tree.yview)
+        sb = ttk.Scrollbar(self.players_tab, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", padx=(0, 8), pady=4)
         self.tree.pack(fill="both", expand=True, padx=(8, 0), pady=4)
         self.tree.bind("<Double-1>", lambda e: self.open_selected())
         self.tree.bind("<Return>", lambda e: self.open_selected())
 
-        bar3 = ttk.Frame(r)
+        bar3 = ttk.Frame(self.players_tab)
         bar3.pack(fill="x", padx=8, pady=4)
         ttk.Button(bar3, text="Open SOTREP", command=self.open_selected).pack(side="left")
         ttk.Button(bar3, text="Group as one person...", command=self.group).pack(side="left", padx=4)
@@ -169,11 +187,37 @@ class App:
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
 
+        self._build_live_tab()
+
         self.status = tk.StringVar()
         self.status_lbl = ttk.Label(r, textvariable=self.status, anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=(0, 8))
         self._update_pause_label()
         self.set_status("Ready. Add an OpenXBL account or use Import to add players.")
+
+    def _build_live_tab(self):
+        lt = self.live_tab
+        top = ttk.Frame(lt)
+        top.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Button(top, text="Check now", command=self.live_check_now).pack(side="left")
+        ttk.Button(top, text="Open SOTREP", command=self.live_open).pack(side="left", padx=4)
+        self.live_status = tk.StringVar(value="Not checked yet.")
+        ttk.Label(top, textvariable=self.live_status, style="Hint.TLabel").pack(side="left", padx=10)
+        ttk.Label(lt, style="Hint.TLabel", wraplength=740, justify="left", text=(
+            "A player is listed only when Xbox itself reports an active Twitch broadcast for that exact account "
+            "(no name guessing). Xbox does not share the Twitch channel or stream title, so none is shown. "
+            f"To protect your OpenXBL quota at most {HOURLY_BUDGET} presence checks run per hour, so players are "
+            "checked gradually, most recent teammates first.")).pack(fill="x", padx=10, pady=(0, 6))
+        cols = ("gamertag", "where", "viewers", "since", "checked")
+        self.live_tree = ttk.Treeview(lt, columns=cols, show="headings", selectmode="browse")
+        for c, t, w in (("gamertag", "Gamertag", 200), ("where", "Platform", 190), ("viewers", "Viewers", 80),
+                        ("since", "Live since", 140), ("checked", "Confirmed at", 140)):
+            self.live_tree.heading(c, text=t)
+            self.live_tree.column(c, width=w, anchor="w")
+        self.live_tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self.live_tree.bind("<Double-1>", lambda e: self.live_open())
+        self.live_empty = ttk.Label(lt, text="Nobody is confirmed live right now.", style="Hint.TLabel")
+        self.live_empty.pack(pady=(0, 8))
 
     # ---- helpers ----
     def set_status(self, text, error=False):
@@ -375,6 +419,12 @@ class App:
                 kind, val = self.q.get_nowait()
                 if kind == "sync":
                     self._finish(val)
+                elif kind == "live":
+                    msg, err = val
+                    self.live_busy = False
+                    done, total = self.live.coverage()
+                    self.live_status.set(f"{msg}  Players checked so far: {done} of {total}.")
+                    self.reload_live()
                 elif kind == "acct_added":
                     name = self.xkey.add(*val)
                     self._refresh_accounts()
@@ -396,6 +446,55 @@ class App:
         if not self.closing:
             self.root.after(200, self._poll)
 
+    # ---- Live now ----
+    def live_check_now(self):
+        if self.live_busy:
+            return
+        if not self.xkey.get():
+            self.live_status.set("Add an OpenXBL account first.")
+            return
+        self.live_busy = True
+        self.live_status.set("Checking...")
+
+        def work():
+            try:
+                self.q.put(("live", (self.live.run_cycle(), False)))
+            except ProviderError as e:
+                self.q.put(("live", (str(e), True)))
+            except Exception as e:  # never let a worker thread die silently
+                self.q.put(("live", (f"Unexpected error: {e}", True)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def reload_live(self):
+        self.live_tree.delete(*self.live_tree.get_children())
+        rows = self.live.live_now()
+        for r in rows:
+            self.live_tree.insert("", "end", iid=str(r["id"]), values=(
+                r["gamertag"], "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
+                fmt_ts(r["started"]), fmt_ts(r["checked_at"])))
+        if rows:
+            self.live_empty.pack_forget()
+        elif not self.live_empty.winfo_ismapped():
+            self.live_empty.pack(pady=(0, 8))
+
+    def live_open(self):
+        for i in self.live_tree.selection():
+            webbrowser.open(sotrep.profile_url(self.live_tree.set(i, "gamertag")))
+
+    def _schedule_live(self, delay_ms=300_000):
+        if self.live_after_id:
+            self.root.after_cancel(self.live_after_id)
+            self.live_after_id = None
+        if not self.closing:
+            self.live_after_id = self.root.after(delay_ms, self._live_tick)
+
+    def _live_tick(self):
+        self.live_after_id = None
+        if not self.paused and self.xkey.get():
+            self.live_check_now()
+        self._schedule_live()
+
     def _update_check(self, manual):
         try:
             self.q.put(("update", (updater.check(), None, manual)))
@@ -404,6 +503,9 @@ class App:
 
     def on_close(self):
         self.closing = True
+        if self.live_after_id:
+            self.root.after_cancel(self.live_after_id)
+            self.live_after_id = None
         if self.after_id:
             self.root.after_cancel(self.after_id)
             self.after_id = None

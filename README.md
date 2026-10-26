@@ -13,6 +13,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | **Import** gamertags (paste/file) | Works, tested. Marked "Import" in the list |
 | **Live** sync via OpenXBL | Uses OpenXBL's documented `GET /v2/recent-players` (third-party service, free key, 150 requests/hour). Parsed from its published spec; **not yet tested against a real account** |
 | What OpenXBL's list contains | Your **whole** Xbox Recently played with list (all games), without game names or times. The app can't filter to Sea of Thieves; "Last seen by app" is when the app first saw the player, and "Xbox list #" is the position in Xbox's list (1 = top, presumably the most recent). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
+| **Live now** tab | Experimental. Lists players whose **Xbox presence** reports an active Twitch broadcast. It checks 30 players per hour at most (OpenXBL has no batch presence), so coverage builds up slowly. No Twitch channel or stream title is available without extra Twitch setup, so none is shown. Not yet seen working on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
 | SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
 | Update check | Notifies you and opens the GitHub release page. No automatic install |
 
@@ -30,6 +31,9 @@ Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups
 3. Several accounts: **Add account...** again for each one, pick the active one in the drop-down (switching refreshes at once) or **Remove** it. All accounts feed the same player history.
 
 OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
+
+## Live now
+The second tab shows players from your history that Xbox reports as broadcasting on Twitch (viewers and start time come from Xbox). Nothing to set up beyond the OpenXBL key. It never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
 
 ## Themes and icon
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
