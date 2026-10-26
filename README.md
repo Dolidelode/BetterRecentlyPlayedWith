@@ -34,6 +34,8 @@ Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups
 OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
 
 ## Twitch icon
+Select players and press **Check live** to ask Xbox about them right now (up to 10 per click, one OpenXBL request each); a results window shows what Xbox says for each, including players who are offline or broadcasting somewhere other than Twitch.
+
 A small Twitch icon on a row means Xbox reports that player as broadcasting on Twitch right now. It runs by itself every 5 minutes for the 20 most recent players in Xbox's current list, never guesses from names, spends at most 30 OpenXBL requests per hour, remembers results for a while, and pauses for 15 minutes if OpenXBL rate-limits you. What is and isn't possible is explained in [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md).
 
 ## Themes and icon

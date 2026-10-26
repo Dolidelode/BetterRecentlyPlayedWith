@@ -150,3 +150,53 @@ def test_history_players_outside_the_list_are_never_checked(db):
     ck = LiveChecker(db, Key(), http=lambda u, d, h, form=False: seen.append(u.rsplit("/", 1)[1]) or OFFLINE, now=Clock())
     ck.run_cycle(max_requests=5)
     assert seen == ["9999"]
+
+
+BROADCAST_OTHER = {"content": {"state": "Online", "devices": [{"titles": [{"name": "X", "activity": {
+    "broadcast": {"provider": "SomethingElse", "viewerCount": 3}}}]}]}}
+
+
+def test_check_accounts_ignores_cache_limits_and_explains(db):
+    db.merge_players([Player(f"P{i}", str(1000 + i)) for i in range(14)] + [Player("NoXuid")], "openxbl", True, now=100)
+    ids = [r["id"] for r in db.list_accounts()]
+    calls = []
+
+    def http(url, data, headers, form=False):
+        calls.append(url.rsplit("/", 1)[1])
+        return BROADCASTING if url.endswith("1000") else (BROADCAST_OTHER if url.endswith("1001") else OFFLINE)
+    ck = LiveChecker(db, Key(), http=http, now=Clock())
+    out = ck.check_accounts(ids, limit=10)
+    assert len(calls) == 10                                              # capped at 10 requests per click
+    by_name = {r["gamertag"]: r for r in out}
+    assert by_name["P0"]["twitch"] and by_name["P0"]["viewers"] == 42
+    assert not by_name["P1"]["twitch"] and by_name["P1"]["broadcast"] == "SomethingElse"   # broadcast, but not Twitch
+    assert by_name["P2"]["state"] == "Offline" and by_name["P2"]["broadcast"] is None
+    assert "XUID" in by_name["NoXuid"]["error"] and any("at most 10" in (r["error"] or "") for r in out)
+    n = len(calls)
+    ck.check_accounts(ids[:3], limit=10)                                 # asking again asks Xbox again (no cache)
+    assert len(calls) == n + 3
+    assert [r["gamertag"] for r in ck.live_now()] == ["P0"]              # and the confirmed one is stored
+
+
+def test_check_accounts_429_and_bad_key(db):
+    seed(db, 3)
+    ids = [r["id"] for r in db.list_accounts()]
+    clock = Clock()
+
+    def limited(*a, **k):
+        e = ProviderError("HTTP 429")
+        e.code = 429
+        raise e
+    ck = LiveChecker(db, Key(), http=limited, now=clock)
+    out = ck.check_accounts(ids)
+    assert "rate limit" in out[0]["error"] and all(r["error"] for r in out) and len(ck.spent) == 1
+    assert ck.budget_left() == 0
+
+    def denied(*a, **k):
+        e = ProviderError("HTTP 401")
+        e.code = 401
+        raise e
+    with pytest.raises(ProviderError) as ei:
+        LiveChecker(db, Key(), http=denied, now=Clock()).check_accounts(ids)
+    assert ei.value.reauth
+    assert LiveChecker(db, Key(), http=denied, now=Clock()).check_accounts([]) == []

@@ -223,6 +223,7 @@ class App:
         ttk.Button(bar3, text="Tag...", command=self.tag_selected).pack(side="left", padx=4)
         ttk.Button(bar3, text="Remove tag...", command=self.untag_selected).pack(side="left")
         ttk.Button(bar3, text="Encounters...", command=self.encounters_dialog).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Check live", command=self.check_live_selected).pack(side="left")
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
@@ -430,6 +431,73 @@ class App:
         win.summary_tv, win.log_tv = sm, tv          # kept for tests
         self._place_dialog(win, 860, 470)
 
+    # ---- on-demand live check ----
+    def check_live_selected(self):
+        ids = self._selected_ids()
+        if not ids:
+            return messagebox.showinfo("Check live", "Select one or more players first (up to 10 at a time).")
+        if not self.xkey.get():
+            return self.set_status("Add an OpenXBL account first.", error=True)
+        if "livecheck" in self.busy:
+            return
+        self._set_busy("livecheck", True)
+        self.set_status(f"Checking {min(len(ids), 10)} selected player(s) with Xbox...")
+
+        def work():
+            try:
+                self.q.put(("livecheck", (self.live.check_accounts(ids), None)))
+            except ProviderError as e:
+                self.q.put(("livecheck", ([], str(e))))
+            except Exception as e:  # never let a worker thread die silently
+                self.q.put(("livecheck", ([], f"Unexpected error: {e}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_live_results(self, results):
+        win = tk.Toplevel(self.root)
+        win.title("Live check results")
+        win.configure(bg=self.pal["bg"])
+        ttk.Label(win, style="Hint.TLabel", wraplength=840, justify="left", text=(
+            "Straight from Xbox presence for each selected player, right now. A Twitch broadcast is only shown "
+            "when Xbox itself reports one for that exact account. Offline players cannot be broadcasting. "
+            "Xbox does not tell us the Twitch channel or stream title.")).pack(fill="x", padx=10, pady=(10, 4))
+        cols = ("player", "state", "twitch", "viewers", "game")
+        tv = ttk.Treeview(win, columns=cols, show="headings", height=min(max(len(results), 1), 10))
+        for c, t, w in (("player", "Player", 160), ("state", "Xbox says", 75), ("twitch", "Twitch", 360),
+                        ("viewers", "Viewers", 60), ("game", "Playing / last online", 190)):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="w")
+        tv.tag_configure("live", background=self.pal["friend"])
+        for r in results:
+            if r["error"]:
+                twitch, state, game = f"not checked: {r['error']}", "-", ""
+            else:
+                state = r["state"]
+                if r["twitch"]:
+                    twitch = "LIVE on Twitch (confirmed by Xbox)"
+                elif r["broadcast"]:
+                    twitch = f"broadcasting on {r['broadcast']} (not Twitch)"
+                else:
+                    twitch = "no broadcast reported"
+                if str(state).casefold() == "online":
+                    game = r["title"] or "online"
+                else:
+                    game = ((fmt_ts(r["seen_at"]) + " ") if r["seen_at"] else "") + (f"({r['title']})" if r["title"] else "")
+            tv.insert("", "end", tags=("live",) if r["twitch"] else (), values=(
+                r["gamertag"], state or "", twitch, r["viewers"] if r["viewers"] is not None else "", game))
+        tv.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        win.results_tv = tv                          # kept for tests
+        self._place_dialog(win, 880, 130 + 26 * min(max(len(results), 1), 10))
+
+    def _on_livecheck(self, results, err):
+        self._set_busy("livecheck", False)
+        if err:
+            return self.set_status(f"Live check failed: {err}", error=True)
+        live_n = sum(1 for r in results if r["twitch"])
+        self.set_status(f"Live check: {len(results)} player(s) asked, {live_n} broadcasting on Twitch according to Xbox.")
+        self.reload()                                # shows the Twitch icon for anyone confirmed live
+        self._show_live_results(results)
+
     def toggle_pause(self):
         self.paused = not self.paused
         self.db.set_setting("paused", "1" if self.paused else "0")
@@ -570,6 +638,8 @@ class App:
                     done, total = self.live.coverage()
                     self.live_status.set(f"Live check: {done} of {total} recent players checked. {msg}")
                     self.reload()          # shows or removes the Twitch icons
+                elif kind == "livecheck":
+                    self._on_livecheck(*val)
                 elif kind == "acct_added":
                     self._set_busy("key", False)
                     name = self.xkey.add(*val)

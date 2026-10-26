@@ -346,6 +346,23 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert d.get_setting("theme") == "3" and app.pal["accent"] == "#e0a040" and app.pal["bg"] == "#2a1d12"
     app.set_theme(99)                                  # out of range falls back to the default
     assert app.theme == 8
+    # "Check live" on selected players: asks Xbox, shows the Twitch icon and a results window
+    import time as _t
+    app.live.http = lambda url, data, headers, form=False: {"content": {"state": "Online", "devices": [{"titles": [{
+        "name": "Sea of Thieves", "activity": {"broadcast": {"provider": "Twitch", "viewerCount": 9}}}]}]}}
+    app.tree.selection_set([i for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New"])
+    app.check_live_selected()
+    end = _t.time() + 5
+    while "livecheck" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.05)
+    assert "livecheck" not in app.busy
+    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    values = dlg.results_tv.item(dlg.results_tv.get_children()[0], "values")
+    assert values[0] == "New" and "LIVE on Twitch" in values[2] and str(values[3]) == "9"
+    icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
+    assert icons["New"]                                              # the icon appeared for the confirmed player
+    dlg.destroy()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()
     assert not app.live_busy

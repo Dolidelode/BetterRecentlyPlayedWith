@@ -29,6 +29,7 @@ class Presence:
     state: str
     title: Optional[str] = None      # current game, or the game they were last seen in
     seen_at: Optional[int] = None    # when Xbox says they were last online (or now, if online)
+    broadcast: Optional[str] = None  # provider of ANY broadcast record Xbox reported (Twitch or not)
     twitch: bool = False
     viewers: Optional[int] = None
     started: Optional[int] = None
@@ -70,7 +71,10 @@ def parse_presence(payload) -> Presence:
         if p.title:
             break
     for b in _find_broadcasts(content):
-        if "twitch" in str(b.get("provider", "")).casefold():
+        provider = str(b.get("provider", ""))
+        if p.broadcast is None:
+            p.broadcast = provider or "unknown provider"
+        if "twitch" in provider.casefold():
             p.twitch = True
             v = b.get("viewerCount", b.get("viewers"))
             p.viewers = int(v) if isinstance(v, (int, float)) else None
@@ -156,6 +160,58 @@ class LiveChecker:
             done += 1
         self.last_error = None
         return f"Checked {done} player(s); {self.budget_left()} of {HOURLY_BUDGET} hourly requests left."
+
+    def check_accounts(self, account_ids: List[int], limit: int = 10) -> List[dict]:
+        """On-demand check of the given accounts (user pressed 'Check live'): ignores the cache, costs one
+        request per player, at most `limit` per call. Counts towards the hourly budget but is not blocked by it."""
+        key = self.key.get()
+        if not key:
+            raise ProviderError("No OpenXBL key set.", reauth=True)
+        if not account_ids:
+            return []
+        with self.db.lock:
+            marks = ",".join("?" * len(account_ids))
+            rows = self.db.conn.execute(
+                f"SELECT id, gamertag, xuid FROM accounts WHERE id IN ({marks}) ORDER BY last_seen DESC",
+                list(account_ids)).fetchall()
+        out: List[dict] = []
+        asked = 0                                  # requests actually sent in this call
+        for r in rows:
+            res = {"id": r["id"], "gamertag": r["gamertag"], "state": None, "title": None, "seen_at": None,
+                   "twitch": False, "viewers": None, "broadcast": None, "error": None}
+            if not r["xuid"]:
+                res["error"] = "no XUID known (imported by name only), so Xbox can't be asked"
+                out.append(res)
+                continue
+            if asked >= limit:
+                res["error"] = f"skipped: at most {limit} players per check"
+                out.append(res)
+                continue
+            if self.now() < self.blocked_until:
+                res["error"] = "OpenXBL rate limit reached recently; try again in a few minutes"
+                out.append(res)
+                continue
+            asked += 1
+            try:
+                p = parse_presence(self.http(PRESENCE_URL + r["xuid"], None, {"X-Authorization": key}))
+                self.spent.append(self.now())
+            except ProviderError as e:
+                code = getattr(e, "code", 0)
+                if code in (401, 403):
+                    raise ProviderError("OpenXBL rejected the key.", reauth=True)
+                self.spent.append(self.now())
+                if code == 429:
+                    self.blocked_until = self.now() + 15 * 60
+                    res["error"] = "OpenXBL rate limit reached; paused for 15 minutes"
+                else:
+                    res["error"] = str(e)
+                out.append(res)
+                continue
+            self._store(r["id"], p)
+            res.update(state=p.state, title=p.title, seen_at=p.seen_at, twitch=p.twitch, viewers=p.viewers,
+                       broadcast=p.broadcast)
+            out.append(res)
+        return out
 
     def _store(self, account_id: int, p: Presence) -> None:
         now = int(self.now())
