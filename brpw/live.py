@@ -27,6 +27,8 @@ LIVE_MAX_AGE = 20 * 60        # a "live" result older than this is no longer sho
 @dataclass
 class Presence:
     state: str
+    title: Optional[str] = None      # current game, or the game they were last seen in
+    seen_at: Optional[int] = None    # when Xbox says they were last online (or now, if online)
     twitch: bool = False
     viewers: Optional[int] = None
     started: Optional[int] = None
@@ -55,13 +57,24 @@ def parse_presence(payload) -> Presence:
     if not isinstance(content, dict) or "state" not in content:
         raise ProviderError("Unexpected presence response from OpenXBL.")
     p = Presence(state=str(content["state"]))
+    from .providers import _iso_to_epoch
+    last = content.get("lastSeen")
+    if isinstance(last, dict):                                   # offline players: Xbox's own "last seen"
+        p.title = str(last.get("titleName") or "") or None
+        p.seen_at = _iso_to_epoch(last.get("timestamp"))
+    for d in content.get("devices") or []:                       # online players: what they are playing
+        for t in (d.get("titles") or []) if isinstance(d, dict) else []:
+            if isinstance(t, dict) and t.get("name"):
+                p.title = str(t["name"])
+                break
+        if p.title:
+            break
     for b in _find_broadcasts(content):
         if "twitch" in str(b.get("provider", "")).casefold():
             p.twitch = True
             v = b.get("viewerCount", b.get("viewers"))
             p.viewers = int(v) if isinstance(v, (int, float)) else None
             p.broadcast_id = str(b.get("broadcastId", b.get("id", ""))) or None
-            from .providers import _iso_to_epoch
             s = b.get("startTime", b.get("started"))
             p.started = int(s) if isinstance(s, (int, float)) else _iso_to_epoch(s)
             break
@@ -83,6 +96,10 @@ class LiveChecker:
         self.blocked_until = 0.0                # after a 429
         self.last_error: Optional[str] = None
 
+    def _owner(self) -> str:
+        active = getattr(self.key, "active", None)
+        return (active() if callable(active) else "") or ""
+
     # ---- budget ----
     def budget_left(self) -> int:
         t = self.now()
@@ -99,10 +116,10 @@ class LiveChecker:
             rows = self.db.conn.execute("""
             SELECT a.id, a.xuid, l.pos, a.last_seen, s.checked_at, s.state
             FROM accounts a
-            JOIN latest_list l ON l.account_id = a.id
+            JOIN latest_by_owner l ON l.account_id = a.id AND l.owner = ?
             LEFT JOIN live_status s ON s.account_id = a.id
             WHERE a.xuid IS NOT NULL AND l.pos < ?
-            ORDER BY l.pos""", (self.scope,)).fetchall()
+            ORDER BY l.pos""", (self._owner(), self.scope)).fetchall()
         due = []
         for r in rows:
             ttl = ONLINE_TTL if (r["state"] or "").casefold() == "online" else OFFLINE_TTL
@@ -141,11 +158,13 @@ class LiveChecker:
         return f"Checked {done} player(s); {self.budget_left()} of {HOURLY_BUDGET} hourly requests left."
 
     def _store(self, account_id: int, p: Presence) -> None:
+        now = int(self.now())
         with self.db.lock, self.db.conn:
             self.db.conn.execute(
-                "INSERT OR REPLACE INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (account_id, int(self.now()), p.state, int(p.twitch), p.viewers, p.started, p.broadcast_id))
+                "INSERT OR REPLACE INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id,"
+                "title,seen_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (account_id, now, p.state, int(p.twitch), p.viewers, p.started, p.broadcast_id, p.title,
+                 now if p.state.casefold() == "online" else p.seen_at))
 
     # ---- reading results ----
     def live_now(self) -> list:
@@ -162,8 +181,9 @@ class LiveChecker:
         """(in-scope players checked at least once, in-scope players)."""
         with self.db.lock:
             c = self.db.conn
-            base = ("FROM latest_list l JOIN accounts a ON a.id = l.account_id "
-                    "WHERE a.xuid IS NOT NULL AND l.pos < ?")
+            base = ("FROM latest_by_owner l JOIN accounts a ON a.id = l.account_id "
+                    "WHERE l.owner = ? AND a.xuid IS NOT NULL AND l.pos < ?")
+            args = (self._owner(), self.scope)
             return (c.execute("SELECT COUNT(*) " + base + " AND EXISTS(SELECT 1 FROM live_status s "
-                              "WHERE s.account_id = a.id)", (self.scope,)).fetchone()[0],
-                    c.execute("SELECT COUNT(*) " + base, (self.scope,)).fetchone()[0])
+                              "WHERE s.account_id = a.id)", args).fetchone()[0],
+                    c.execute("SELECT COUNT(*) " + base, args).fetchone()[0])

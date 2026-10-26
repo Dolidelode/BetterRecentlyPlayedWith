@@ -313,6 +313,10 @@ class OpenXblProvider(RecentPlayersProvider):
     notes = ""
     force_friends = False      # a manual refresh ignores the 30-minute friends throttle
 
+    @property
+    def owner(self) -> str:   # which Xbox account's list this is
+        return self.key.active() or ""
+
     def __init__(self, key: OpenXblKey, http=http_json):
         self.key, self.http = key, http
 

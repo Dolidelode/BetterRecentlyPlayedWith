@@ -22,6 +22,35 @@ def fmt_ts(ts) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "-"
 
 
+class Spinner(tk.Canvas):
+    """Small rotating arc shown while something loads (Tk has no native spinner)."""
+
+    def __init__(self, master, size=18, color="#22c7d6", bg="#0b1626"):
+        super().__init__(master, width=size, height=size, bg=bg, highlightthickness=0)
+        self.size, self.color, self.angle, self.job = size, color, 0, None
+
+    def recolor(self, color, bg):
+        self.color = color
+        self.configure(bg=bg)
+
+    def start(self):
+        if self.job is None:
+            self._tick()
+
+    def stop(self):
+        if self.job is not None:
+            self.after_cancel(self.job)
+            self.job = None
+        self.delete("all")
+
+    def _tick(self):
+        s = self.size
+        self.delete("all")
+        self.create_arc(2, 2, s - 2, s - 2, start=self.angle, extent=110, style="arc", outline=self.color, width=3)
+        self.angle = (self.angle - 28) % 360
+        self.job = self.after(55, self._tick)
+
+
 class App:
     def __init__(self, root: tk.Tk, db: Database):
         self.root, self.db = root, db
@@ -36,6 +65,7 @@ class App:
         self.after_id = None
         self.live_after_id = None
         self.live_busy = False
+        self.busy = set()          # names of running background jobs (drives the spinner)
         self.to_top_after_sync = False
         self.live = LiveChecker(db, self.xkey)
         self._build()
@@ -89,6 +119,7 @@ class App:
             self.tree.tag_configure("odd", background=P["stripe"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
             self.legend.configure(bg=P["friend"], fg=FG)
+            self.spinner.recolor(acc, BG)
 
     def _apply_icon(self):
         try:
@@ -202,8 +233,12 @@ class App:
                   style="Hint.TLabel").pack(side="right", padx=(0, 10))
 
         self.status = tk.StringVar()
-        self.status_lbl = ttk.Label(r, textvariable=self.status, anchor="w")
-        self.status_lbl.pack(fill="x", padx=8, pady=(0, 8))
+        statusbar = ttk.Frame(r)
+        statusbar.pack(fill="x", padx=8, pady=(0, 8))
+        self.spinner = Spinner(statusbar, color=self.pal["accent"], bg=self.pal["bg"])
+        self.spinner.pack(side="left", padx=(0, 6))
+        self.status_lbl = ttk.Label(statusbar, textvariable=self.status, anchor="w")
+        self.status_lbl.pack(side="left", fill="x", expand=True)
         self._update_pause_label()
         self.set_status("Ready. Add an OpenXBL account or use Import to add players.")
 
@@ -258,6 +293,13 @@ class App:
 
     def _selected_ids(self):
         return [int(i) for i in self.tree.selection()]
+
+    def _set_busy(self, name: str, on: bool):
+        (self.busy.add if on else self.busy.discard)(name)
+        if self.busy:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
 
     def _update_pause_label(self):
         self.pause_btn.configure(text="Resume auto-refresh" if self.paused else "Pause auto-refresh")
@@ -339,27 +381,54 @@ class App:
         ids = self._selected_ids()
         if not ids:
             return messagebox.showinfo("Encounters", "Select one or more players first.")
+        owner = self.xkey.active()
+        details = self.db.account_details(ids, owner)
         rows = self.db.encounters_for_many(ids)
         win = tk.Toplevel(self.root)
-        win.title(f"Encounters ({len(rows)} for {len(ids)} player(s))")
+        win.title(f"Players: {len(ids)} selected, {len(rows)} recorded encounter(s)")
         win.configure(bg=self.pal["bg"])
-        ttk.Label(win, style="Hint.TLabel", wraplength=480, text=(
-            "'When' is the time this app saw the player. Xbox does not provide real encounter times, and a "
-            "player is recorded again only after leaving and re-entering Xbox's recent list.")
-        ).pack(fill="x", padx=10, pady=(10, 4))
-        tv = ttk.Treeview(win, columns=("player", "when", "source"), show="headings")
-        for c, t, w in (("player", "Player", 190), ("when", "When", 150), ("source", "Source", 90)):
+        ttk.Label(win, style="Hint.TLabel", wraplength=820, justify="left", text=(
+            "Xbox does not provide encounter times. 'First/last seen' is when this app saw the player in Xbox's "
+            "recent list, and an encounter is recorded when a player appears in the list of the account you sync "
+            "with (not on every refresh). 'Last online' comes from Xbox presence and only exists for players the "
+            "Twitch/presence check has already looked at.")).pack(fill="x", padx=10, pady=(10, 4))
+        cols = ("player", "friend", "tags", "first", "last", "times", "pos", "online")
+        sm = ttk.Treeview(win, columns=cols, show="headings", height=min(max(len(details), 1), 6))
+        for c, t, w in (("player", "Player", 160), ("friend", "Friend", 60), ("tags", "Tags", 90),
+                        ("first", "First seen", 110), ("last", "Last seen", 110), ("times", "Times", 55),
+                        ("pos", "Xbox #", 55), ("online", "Last online (Xbox)", 200)):
+            sm.heading(c, text=t)
+            sm.column(c, width=w, anchor="w")
+        sm.tag_configure("friend", background=self.pal["friend"])
+        for d in details:
+            if d["state"] is None:
+                online = "not checked yet"
+            elif str(d["state"]).casefold() == "online":
+                online = "online now" + (f": {d['title']}" if d["title"] else "")
+            else:
+                online = (fmt_ts(d["seen_at"]) if d["seen_at"] else "offline") + (f" ({d['title']})" if d["title"] else "")
+            name = d["gamertag"] + (f" (was: {d['old_names']})" if d["old_names"] else "")
+            sm.insert("", "end", tags=("friend",) if d["relation"] in ("Friend", "In your list") else (), values=(
+                name, d["relation"] or "", d["tags"] or "", fmt_ts(d["first_seen"]), fmt_ts(d["last_seen"]),
+                d["times"], d["pos"] + 1 if d["pos"] is not None else "", online))
+        sm.pack(fill="x", padx=10, pady=4)
+        ttk.Label(win, text="Recorded encounters", style="Hint.TLabel").pack(anchor="w", padx=10, pady=(6, 0))
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=(2, 10))
+        tv = ttk.Treeview(frame, columns=("player", "when", "source"), show="headings")
+        for c, t, w in (("player", "Player", 220), ("when", "When (seen by app)", 170), ("source", "Source", 90)):
             tv.heading(c, text=t)
             tv.column(c, width=w, anchor="w")
-        sb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y", pady=8, padx=(0, 8))
-        tv.pack(fill="both", expand=True, padx=(10, 0), pady=8)
+        sb.pack(side="right", fill="y")
+        tv.pack(fill="both", expand=True)
         tv.tag_configure("odd", background=self.pal["stripe"])
         for n, r in enumerate(rows):
             tv.insert("", "end", tags=("odd",) if n % 2 else (), values=(
                 r["gamertag"], fmt_ts(r["observed_at"]), "Live" if r["source"] in ("xbox-live", "openxbl") else "Import"))
-        self._place_dialog(win, 520, 380)
+        win.summary_tv, win.log_tv = sm, tv          # kept for tests
+        self._place_dialog(win, 860, 470)
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -418,6 +487,7 @@ class App:
         if not (k and k.strip()):
             return
         self.set_status("Checking the key...")
+        self._set_busy("key", True)
 
         def work():
             try:
@@ -456,6 +526,7 @@ class App:
         self.set_status(f"Refreshing as {who}...")
         if manual:
             self.live_check_now()
+        self._set_busy("sync", True)
         self.sync.run_async(prov, lambda out: self.q.put(("sync", out)))
 
     def _schedule(self):
@@ -475,6 +546,8 @@ class App:
     def _finish(self, out: "SyncOutcome | None", imported=False):
         if out is None:
             return self.set_status("A refresh is already running.")
+        if not imported:
+            self._set_busy("sync", False)
         if out.ok:
             who = "" if imported or not self.xkey.active() else f" as {self.xkey.active()}"
             self.set_status(("Imported: " if imported else f"Synced{who}: ") + out.message)
@@ -493,14 +566,17 @@ class App:
                 elif kind == "live":
                     msg, err = val
                     self.live_busy = False
+                    self._set_busy("live", False)
                     done, total = self.live.coverage()
                     self.live_status.set(f"Live check: {done} of {total} recent players checked. {msg}")
                     self.reload()          # shows or removes the Twitch icons
                 elif kind == "acct_added":
+                    self._set_busy("key", False)
                     name = self.xkey.add(*val)
                     self._refresh_accounts()
                     self.set_status(f"Added '{name}'. Click 'Refresh now'.")
                 elif kind == "acct_err":
+                    self._set_busy("key", False)
                     self.set_status(f"Could not add account: {val}", error=True)
                 elif kind == "update":
                     info, err, manual = val
@@ -522,6 +598,7 @@ class App:
         if self.live_busy or not self.xkey.get():
             return
         self.live_busy = True
+        self._set_busy("live", True)
 
         def work():
             try:
@@ -554,6 +631,7 @@ class App:
 
     def on_close(self):
         self.closing = True
+        self.spinner.stop()
         if self.live_after_id:
             self.root.after_cancel(self.live_after_id)
             self.live_after_id = None

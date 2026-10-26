@@ -100,7 +100,9 @@ def test_encounters_for_many_combines_accounts(db):
 def test_existing_groups_become_tags_on_migration(tmp_path):
     from brpw.db import MIGRATIONS
     d = Database(tmp_path / "p.db", migrations=MIGRATIONS[:4])        # an older install (schema 4)
-    d.merge_players([Player("A", "1"), Player("B", "2")], "import", False)
+    for i, n in enumerate("AB"):                                      # raw rows: the old schema has no newer tables
+        d.conn.execute("INSERT INTO accounts(xuid,gamertag,gamertag_key,first_seen,last_seen,source) "
+                       "VALUES(?,?,?,1,1,'import')", (str(i + 1), n, n.casefold()))
     d.conn.execute("INSERT INTO people(id,name,created_at) VALUES(1,'Old group',0)")
     d.conn.execute("UPDATE accounts SET person_id=1")
     d.conn.commit()
@@ -271,14 +273,15 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     d = Database(tmp_path / "p.db")
     d.set_setting("auto_update_check", "0")
     monkeypatch.setenv("BRPW_DATA_DIR", str(tmp_path))
-    d.merge_players([Player("Old", "1")], "openxbl", True, now=100)
-    d.merge_players([Player("New", "2"), Player("New2", "3")], "openxbl", True, now=200)
+    d.merge_players([Player("Old", "1")], "openxbl", True, now=100, owner="Main")
+    d.merge_players([Player("New", "2"), Player("New2", "3")], "openxbl", True, now=200, owner="Main")
     from brpw.providers import OpenXblKey
     OpenXblKey(tmp_path / "openxbl_keys.json").add("Main", "k")
     d.replace_friends("Main", {"2": "Friend", "3": "You follow"})
     new_id = {r["gamertag"]: r["id"] for r in d.list_accounts()}["New2"]
     now = int(time.time())                                              # New2 is confirmed live on Twitch by Xbox
-    d.conn.execute("INSERT INTO live_status VALUES(?,?,?,?,?,?,?)", (new_id, now, "Online", 1, 5, now - 60, "b"))
+    d.conn.execute("INSERT INTO live_status(account_id,checked_at,state,twitch,viewers,started,broadcast_id) "
+                   "VALUES(?,?,?,?,?,?,?)", (new_id, now, "Online", 1, 5, now - 60, "b"))
     d.conn.commit()
     app = ui.App(root, d)
     root.update()
@@ -301,6 +304,20 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.search.set("crew")                              # searching finds tags
     assert names() == ["New2"]
     app.search.set("")
+    # spinner: runs while a job is busy, stops when the last one finishes
+    app._set_busy("sync", True)
+    app._set_busy("live", True)
+    assert app.spinner.job is not None
+    app._set_busy("sync", False)
+    assert app.spinner.job is not None
+    app._set_busy("live", False)
+    assert app.spinner.job is None and not app.busy
+    # Encounters view: a summary row per selected player plus the recorded encounters
+    app.tree.selection_set(app.tree.get_children())
+    app.encounters_dialog()
+    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    assert len(dlg.summary_tv.get_children()) == 3 and len(dlg.log_tv.get_children()) == 3
+    dlg.destroy()
     # dialogs must open centred over the app window (not at the screen's top-left) and must never grab input
     seen = {}
 
@@ -533,3 +550,43 @@ def test_manual_refresh_bypasses_friends_throttle_and_empty_result_retries_soon(
     prov.force_friends = True
     prov.post_sync(d)                                   # manual refresh asks again
     assert len(calls) == n + 1
+
+
+def test_switching_xbox_accounts_does_not_create_fake_encounters(db):
+    a = [Player("P1", "1"), Player("P2", "2")]
+    b = [Player("P2", "2"), Player("P3", "3")]
+    db.merge_players(a, "openxbl", True, now=100, owner="Main")      # first sync of Main: baseline, everyone is new
+    db.merge_players(b, "openxbl", True, now=200, owner="Alt")       # first sync of Alt: only P3 is new
+    counts = lambda: {r["gamertag"]: r["encounters"] for r in db.list_accounts()}
+    assert counts() == {"P1": 1, "P2": 1, "P3": 1}
+    for t in range(300, 700, 100):                                   # flip between the accounts and refresh a lot
+        db.merge_players(a, "openxbl", True, now=t, owner="Main")
+        db.merge_players(b, "openxbl", True, now=t + 50, owner="Alt")
+    assert counts() == {"P1": 1, "P2": 1, "P3": 1}                   # still no extra encounters
+    db.merge_players([Player("P1", "1")], "openxbl", True, now=800, owner="Main")   # P2 leaves Main's list ...
+    db.merge_players(a, "openxbl", True, now=900, owner="Main")                       # ... and really comes back
+    assert counts()["P2"] == 2
+    # each account sees its own list positions
+    assert {r["gamertag"]: r["pos"] for r in db.list_accounts(owner="Alt")} == {"P1": None, "P2": 0, "P3": 1}
+    assert {r["gamertag"]: r["pos"] for r in db.list_accounts(owner="Main")}["P1"] == 0
+
+
+def test_parse_presence_reads_title_and_last_seen():
+    from brpw import live
+    offline = {"content": {"xuid": "1", "state": "Offline", "lastSeen": {
+        "titleName": "Sea of Thieves", "timestamp": "2024-07-29T15:02:02.005445"}}}
+    p = live.parse_presence(offline)
+    assert p.title == "Sea of Thieves" and p.seen_at and not p.twitch
+    online = {"content": {"state": "Online", "devices": [{"titles": [{"name": "Forza Horizon 5"}]}]}}
+    assert live.parse_presence(online).title == "Forza Horizon 5"
+
+
+def test_account_details_summary(db):
+    db.merge_players([Player("OldName", "1")], "openxbl", True, now=100, owner="Main")
+    db.merge_players([Player("NewName", "1")], "openxbl", True, now=200, owner="Main")
+    ids = [r["id"] for r in db.list_accounts()]
+    db.add_tag(ids, "crew")
+    db.replace_friends("Main", {"1": "Friend"})
+    d = db.account_details(ids, "Main")[0]
+    assert d["gamertag"] == "NewName" and d["old_names"] == "OldName" and d["tags"] == "crew"
+    assert d["relation"] == "Friend" and d["times"] == 1 and d["pos"] == 0 and d["state"] is None

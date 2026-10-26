@@ -21,7 +21,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 ## Using it
 1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
 2. **Import...** to paste gamertags, or **Add account...** for live sync (below).
-3. Double-click a player (or **Open SOTREP**). Select several rows and **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically), and **Encounters...** to see every recorded encounter of the selected players together.
+3. Double-click a player (or **Open SOTREP**). Select several rows and **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically), and **Encounters...** for a summary of the selected players (first/last seen, times seen, name changes, friend status, Xbox's "last online" when known) plus every recorded encounter.
 4. Leave it open: it refreshes every 60 s (changeable, minimum 30 s; **Pause** any time).
 
 Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `openxbl_keys.json`), so updating or moving the exe never touches it.

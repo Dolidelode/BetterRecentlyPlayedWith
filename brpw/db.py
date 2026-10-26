@@ -93,7 +93,16 @@ def _m5(c: sqlite3.Connection) -> None:
               "SELECT a.id, p.name FROM accounts a JOIN people p ON p.id = a.person_id")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5]  # index i migrates user_version i -> i+1
+def _m6(c: sqlite3.Connection) -> None:
+    # "Latest list" per synced Xbox account: switching accounts must not look like new encounters.
+    c.execute("""CREATE TABLE latest_by_owner(
+        owner TEXT NOT NULL, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        synced_at INTEGER NOT NULL, pos INTEGER, PRIMARY KEY(owner, account_id))""")
+    c.execute("ALTER TABLE live_status ADD COLUMN title TEXT")        # game from Xbox presence
+    c.execute("ALTER TABLE live_status ADD COLUMN seen_at INTEGER")   # when Xbox says they were last online
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -200,11 +209,12 @@ class Database:
 
     # ---- merging observations ----
     def merge_players(self, players: Iterable[Player], source: str, live: bool,
-                      now: Optional[int] = None) -> MergeResult:
+                      now: Optional[int] = None, owner: str = "") -> MergeResult:
         """Merge one observed list atomically.
 
-        live=True: the list replaces the "latest list" snapshot; a timestamp-less player is
-        recorded as an encounter only when it newly appears in the snapshot.
+        live=True: the list replaces that Xbox account's (`owner`) "latest list" snapshot; a timestamp-less
+        player is recorded as an encounter only when it newly appears in THAT account's snapshot. The very
+        first sync of an account is a baseline: only brand-new players get an encounter.
         live=False (import): timestamp-less players get one encounter per account.
         Accounts are never merged by similar gamertags; only by XUID or by exact gamertag
         among accounts that have no XUID.
@@ -212,9 +222,12 @@ class Database:
         now = int(now if now is not None else time.time())
         res = MergeResult()
         with self.lock, self.conn:
-            prev = {r[0] for r in self.conn.execute("SELECT account_id FROM latest_list")}
+            prev = {r[0] for r in self.conn.execute(
+                "SELECT account_id FROM latest_by_owner WHERE owner=?", (owner,))}
+            baseline = live and self.conn.execute(
+                "SELECT 1 FROM settings WHERE key=?", ("list_synced:" + owner,)).fetchone() is None
             if live:
-                self.conn.execute("DELETE FROM latest_list")
+                self.conn.execute("DELETE FROM latest_by_owner WHERE owner=?", (owner,))
             seen_ids = set()
             for idx, p in enumerate(players):
                 tag = p.gamertag.strip()
@@ -252,7 +265,7 @@ class Database:
                 if p.observed_at:
                     record = True
                 elif live:
-                    record = fresh or aid not in prev
+                    record = fresh or (aid not in prev and not baseline)
                 else:
                     record = fresh or not self.conn.execute(
                         "SELECT 1 FROM encounters WHERE account_id=? AND source=?",
@@ -266,21 +279,26 @@ class Database:
                                       (observed, aid))
                 if live:
                     self.conn.execute(
-                        "INSERT OR REPLACE INTO latest_list(account_id,synced_at,pos) VALUES(?,?,?)", (aid, now, idx))
+                        "INSERT OR REPLACE INTO latest_by_owner(owner,account_id,synced_at,pos) VALUES(?,?,?,?)",
+                        (owner, aid, now, idx))
+            if live:
+                self.conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                                  ("list_synced:" + owner, "1"))
         return res
 
     # ---- queries ----
-    def list_accounts(self, search: str = "", owner: Optional[str] = None) -> List[sqlite3.Row]:
+    def list_accounts(self, search: str = "", owner: Optional[str] = "") -> List[sqlite3.Row]:
+        owner = owner or ""
         q = """SELECT a.id, a.xuid, a.gamertag, a.last_seen, a.first_seen, a.person_id,
                       (SELECT GROUP_CONCAT(tag, ', ') FROM (SELECT tag FROM tags t WHERE t.account_id=a.id
                                                             ORDER BY tag)) AS tags, a.source,
                       (SELECT COUNT(*) FROM encounters e WHERE e.account_id=a.id) AS encounters,
-                      EXISTS(SELECT 1 FROM latest_list l WHERE l.account_id=a.id) AS in_latest,
-                      (SELECT l.pos FROM latest_list l WHERE l.account_id=a.id) AS pos,
+                      EXISTS(SELECT 1 FROM latest_by_owner l WHERE l.account_id=a.id AND l.owner=?) AS in_latest,
+                      (SELECT l.pos FROM latest_by_owner l WHERE l.account_id=a.id AND l.owner=?) AS pos,
                       f.relation AS relation
                FROM accounts a
                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?"""
-        args: list = [owner]
+        args: list = [owner, owner, owner]      # in_latest, pos, friends join (textual order)
         if search.strip():
             like = f"%{search.strip().casefold()}%"
             q += (" WHERE a.gamertag_key LIKE ? OR IFNULL(a.xuid,'') LIKE ?"
@@ -289,6 +307,27 @@ class Database:
         q += " ORDER BY a.last_seen DESC, pos IS NULL, pos ASC, a.id DESC"
         with self.lock:
             return self.conn.execute(q, args).fetchall()
+
+    def account_details(self, account_ids: List[int], owner: Optional[str] = "") -> List[sqlite3.Row]:
+        """One summary row per account for the Encounters view (everything here comes from stored data)."""
+        if not account_ids:
+            return []
+        owner = owner or ""
+        marks = ",".join("?" * len(account_ids))
+        with self.lock:
+            return self.conn.execute(f"""
+                SELECT a.id, a.gamertag, a.xuid, a.first_seen, a.last_seen,
+                  (SELECT COUNT(*) FROM encounters e WHERE e.account_id=a.id) AS times,
+                  (SELECT l.pos FROM latest_by_owner l WHERE l.account_id=a.id AND l.owner=?) AS pos,
+                  f.relation AS relation,
+                  (SELECT GROUP_CONCAT(tag, ', ') FROM tags t WHERE t.account_id=a.id) AS tags,
+                  (SELECT GROUP_CONCAT(gamertag, ', ') FROM gamertag_history h
+                     WHERE h.account_id=a.id AND h.gamertag<>a.gamertag) AS old_names,
+                  s.state, s.title, s.seen_at, s.checked_at
+                FROM accounts a
+                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?
+                LEFT JOIN live_status s ON s.account_id=a.id
+                WHERE a.id IN ({marks}) ORDER BY a.last_seen DESC""", [owner, owner, *account_ids]).fetchall()
 
     # ---- friends (per synced Xbox account) ----
     def replace_friends(self, owner: str, relations: dict) -> None:
