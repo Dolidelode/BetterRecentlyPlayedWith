@@ -53,6 +53,12 @@ account linking, no Twitch API key, no hosted backend, no secrets in the exe, no
   gamertags) and is **not done**.
 * [SOTREP](https://www.sotrep.com/) clearly links Xbox, Twitch and Discord identities, but has no public API; its
   guest API is CAPTCHA-protected and its terms forbid overloading it. Not used.
+  **Checked again on request (2026-10-26)** by fetching a public profile page
+  (`https://www.sotrep.com/search/<id>`): the *Social Links* panel (where a Twitch account would appear) shows
+  "Log in to unlock this info", and searching needs a "Quick Security Check" first. So the Twitch link is only visible
+  to a signed-in SOTREP user in a browser. An app could only read it by getting past that check or by handling the
+  user's SOTREP login. Both are ruled out (no bypassing bot checks, no collecting credentials). The existing
+  **Open SOTREP** button already lets a signed-in user see it in their own browser.
 
 ## Feasibility
 | Requirement | Possible with OpenXBL key only? |
@@ -80,4 +86,6 @@ channel/title are stated in the tab.
    by id with no guessing). Excluded now because it adds a setup step; worth testing once a broadcasting player's
    presence record has been observed.
 2. A hosted service holding a Twitch secret: excluded (backend).
-3. Wait for SOTREP or OpenXBL to publish linked-account/stream data.
+3. Wait for SOTREP or OpenXBL to publish linked-account/stream data. The realistic route is to ask the SOTREP owner for an
+   official, documented endpoint (for example: XUIDs in, linked Twitch channel out, with an app key), which would make a
+   one-request lookup for the latest 20 players possible without scraping.
