@@ -77,7 +77,7 @@ whole history), within a budget of `HOURLY_BUDGET = 30` single-player presence r
 tier). Never-checked players first, then stale ones (online players re-checked after 10 min, offline after 3 h). Results are cached in SQLite (`live_status`). A player is shown
 only if the fresh (<20 min) presence record contains a broadcast whose provider is Twitch; otherwise nothing is
 claimed. HTTP 429 pauses checks for 15 minutes; a rejected key asks the user to re-add it. Limits and the missing
-channel/title are stated in the tab.
+channel/title are noted in the README.
 
 ## Not implemented, and options
 1. **One-time Twitch approval (Device Code flow, public client, no secret).** Would allow Get Streams
