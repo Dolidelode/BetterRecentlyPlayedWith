@@ -100,3 +100,15 @@ Testing OpenXBL's `GET /v2/player/summary/{xuids}` with a real key showed:
 * Still **unverified**: what a true broadcast record contains (provider, viewers, start time) and whether the service
   is Twitch. Until a real broadcaster is seen, a player is labelled "broadcasting per Xbox" and only called Twitch when
   the broadcast record says so. Profile (`/v2/account/{xuid}`) returns 16 settings, none about linked accounts.
+
+## Correction: Xbox DOES have linked accounts (2026-10-26)
+Earlier text said Xbox "seems not to share" linked accounts. That was wrong. Xbox has a **Linked accounts** setting (Discord,
+Facebook, Reddit, Steam, Twitch) with a per-account "Show icon on my profile" switch, and other players can see those icons in the
+Xbox app / Game Bar ([Xbox support guide, not official Microsoft page](https://todmccoy.com/wp-content/uploads/2025/11/Link-your-social-network-accounts-to-Xbox-FINAL-Tod-McCoy.docx);
+[OnMSFT](https://onmsft.com/?p=219042)). SOTREP most likely reads Twitch from there.
+What I verified: **OpenXBL does not relay it.** In `/v2/player/summary` the Xbox "decoration" slots (`detail`, `socialManager`,
+`broadcast`, `follower`, ...) are empty for 10 real players, `/v2/account/{xuid}` has 16 profile settings and none is a linked
+account, and the query parameters `decoration=` / `decorations=` are ignored. I could not find Microsoft documentation for the
+Xbox endpoint or field name that carries linked accounts, so that is **unverified**; the next step is to capture the real response
+(browser dev tools on xbox.com while signed in) or ask the OpenXBL developer to expose it.
+Players only appear with a Twitch link if they linked it AND enabled "Show icon on my profile".
