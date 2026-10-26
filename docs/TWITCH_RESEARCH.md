@@ -120,3 +120,13 @@ time). The result is cached with the player for the 20-minute freshness window, 
 one per cycle. In the automatic cycle it respects the hourly budget; **Check live** is an explicit action and is not blocked.
 If presence fails or has no record, the player stays "broadcasting per Xbox (service not stated)". The presence record's
 REST shape is still **unverified** against a real broadcaster.
+
+## Implemented: optional Twitch section (2026-10-26)
+Findings that shaped it: a PC streamer who was live on Twitch showed as **offline** in Xbox presence
+and summary, so Xbox cannot see such streams; SOTREP's own page script merges Twitch links from its database, from
+connected accounts and from the player's **Discord profile**, not from Xbox linked accounts; Twitch's Get Streams needs an
+application token. So the app now has an opt-in section: the user enters their own Twitch client ID/secret once (local file
+only), saves a Twitch channel per player (verified through Twitch Get Users to an exact numeric ID, which SOTREP also shows),
+and live status comes from Get Streams in batches of 100. Verified end to end with a real Twitch application: the channel
+resolved to the same numeric ID SOTREP shows, and Get Streams reported it live with title, game and viewers.
+Limits: the Twitch channel must still be supplied by the user (copied from SOTREP); the app cannot discover it.

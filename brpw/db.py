@@ -108,7 +108,18 @@ def _m7(c: sqlite3.Connection) -> None:
     c.execute("ALTER TABLE live_status ADD COLUMN provider TEXT")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7]  # index i migrates user_version i -> i+1
+def _m8(c: sqlite3.Connection) -> None:
+    # Optional Twitch section: the Twitch channel a user saved for a player (exact numeric Twitch ID) and its last status.
+    c.execute("""CREATE TABLE twitch_links(
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        twitch_id TEXT NOT NULL, login TEXT NOT NULL, display_name TEXT NOT NULL, linked_at INTEGER NOT NULL)""")
+    c.execute("CREATE INDEX ix_twitch_links_tid ON twitch_links(twitch_id)")
+    c.execute("""CREATE TABLE twitch_status(
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        checked_at INTEGER NOT NULL, live INTEGER NOT NULL, title TEXT, game TEXT, viewers INTEGER, started_at INTEGER)""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -301,9 +312,14 @@ class Database:
                       (SELECT COUNT(*) FROM encounters e WHERE e.account_id=a.id) AS encounters,
                       EXISTS(SELECT 1 FROM latest_by_owner l WHERE l.account_id=a.id AND l.owner=?) AS in_latest,
                       (SELECT l.pos FROM latest_by_owner l WHERE l.account_id=a.id AND l.owner=?) AS pos,
-                      f.relation AS relation
+                      f.relation AS relation,
+                      tl.twitch_id AS twitch_id, tl.login AS twitch_login, tl.display_name AS twitch_name,
+                      ts.live AS twitch_live, ts.viewers AS twitch_viewers, ts.game AS twitch_game,
+                      ts.title AS twitch_title, ts.checked_at AS twitch_checked
                FROM accounts a
-               LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?"""
+               LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?
+               LEFT JOIN twitch_links tl ON tl.account_id=a.id
+               LEFT JOIN twitch_status ts ON ts.account_id=a.id"""
         args: list = [owner, owner, owner]      # in_latest, pos, friends join (textual order)
         if search.strip():
             like = f"%{search.strip().casefold()}%"
@@ -357,6 +373,34 @@ class Database:
             return self.conn.execute(
                 "SELECT observed_at, source FROM encounters WHERE account_id=? ORDER BY observed_at DESC",
                 (account_id,)).fetchall()
+
+    # ---- Twitch (saved by the user, verified against Twitch, matched by exact Twitch ID) ----
+    def link_twitch(self, account_id: int, twitch_id: str, login: str, display_name: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO twitch_links(account_id,twitch_id,login,display_name,linked_at) VALUES(?,?,?,?,?)",
+                (account_id, twitch_id, login, display_name, int(time.time())))
+            self.conn.execute("DELETE FROM twitch_status WHERE account_id=?", (account_id,))   # old status is stale now
+
+    def unlink_twitch(self, account_ids: List[int]) -> None:
+        with self.lock, self.conn:
+            self.conn.executemany("DELETE FROM twitch_links WHERE account_id=?", [(a,) for a in account_ids])
+            self.conn.executemany("DELETE FROM twitch_status WHERE account_id=?", [(a,) for a in account_ids])
+
+    def twitch_links(self, account_ids: Optional[List[int]] = None) -> List[sqlite3.Row]:
+        with self.lock:
+            if account_ids is None:
+                return self.conn.execute("SELECT * FROM twitch_links").fetchall()
+            if not account_ids:
+                return []
+            marks = ",".join("?" * len(account_ids))
+            return self.conn.execute(f"SELECT * FROM twitch_links WHERE account_id IN ({marks})", list(account_ids)).fetchall()
+
+    def store_twitch_status(self, rows) -> None:
+        with self.lock, self.conn:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO twitch_status(account_id,checked_at,live,title,game,viewers,started_at) "
+                "VALUES(?,?,?,?,?,?,?)", list(rows))
 
     # ---- tags (manual labels; never applied automatically) ----
     @staticmethod

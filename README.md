@@ -15,6 +15,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | What OpenXBL's list contains | Your **whole** Xbox Recently played with list (all games), without game names or times. The app can't filter to Sea of Thieves; "Last seen by app" is when the app first saw the player, and "Xbox list #" is the position in Xbox's list (1 = top, presumably the most recent). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
 | Friend highlight | Rows of players who are your friends (you follow each other) get a different colour. Uses your OpenXBL friends list (1 extra request per 30 min), matched by XUID, never by name. Switching account jumps back to the top of the list |
 | **Twitch icon** | Experimental. A Twitch icon appears on a player's row only while **Xbox itself** reports an active Twitch broadcast for that account. It checks the 20 most recent players automatically (one OpenXBL request each, max 30 per hour). No channel link or stream title is available, so none is shown. Not yet seen on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
+| **Twitch (optional)** | Save a player's Twitch channel once (copy the name from SOTREP); the app verifies it with Twitch to an exact channel ID and then checks live status for all saved channels in one request every 2 minutes: title, game, viewers, watch link. Needs your own free Twitch application keys, entered once and stored only on your PC. Tested against the real Twitch API |
 | SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
 | Update check | Notifies you and opens the GitHub release page. No automatic install |
 
@@ -32,6 +33,13 @@ Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups
 3. Several accounts: **Add account...** again for each one, pick the active one in the drop-down (switching refreshes at once) or **Remove** it. All accounts feed the same player history.
 
 OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
+
+## Twitch (optional)
+Xbox only reports broadcasts that go through Xbox, so it misses most PC streamers. This section asks Twitch directly, for players whose channel **you** saved:
+1. **Twitch setup...** (top right): open the Twitch developer console, register a free application (OAuth redirect `http://localhost`, category Other, client type Confidential), then paste its Client ID and a new Secret into the app. They are stored only in `%APPDATA%\BetterRecentlyPlayedWith\twitch.json` (never in the repository, the program file or the database), and a wrong key is rejected with a clear message.
+2. Select **one** player, press **Twitch...** and type the channel (name, `@name` or a twitch.tv link; empty removes it). Twitch resolves it to an exact numeric channel ID, so a renamed channel keeps working and no name is ever guessed.
+3. The **Twitch** column shows `LIVE <viewers> - <name>` while the channel is live (with the live icon), or just the name. **Open Twitch** opens the channel; **Check live** also shows game, title and viewers for the selected players.
+Checks run by themselves every 2 minutes (100 channels per Twitch request) and stay silent unless something fails. Without keys the rest of the app works as before.
 
 ## Twitch icon
 Select players and press **Check live** to ask Xbox about them right now (up to 20 per click, 10 per OpenXBL request); a results window shows what Xbox says for each, including players who are offline or broadcasting somewhere other than Twitch.

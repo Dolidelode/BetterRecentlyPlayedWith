@@ -18,3 +18,4 @@ openxbl*.key
 backups/
 export*.csv
 export*.json
+twitch*.json

@@ -346,12 +346,49 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert d.get_setting("theme") == "3" and app.pal["accent"] == "#e0a040" and app.pal["bg"] == "#2a1d12"
     app.set_theme(99)                                  # out of range falls back to the default
     assert app.theme == 8
+    # ---- optional Twitch section ----
+    from brpw import twitch as tw_mod
+    by = {r["gamertag"]: r["id"] for r in d.list_accounts()}
+    d.link_twitch(by["Old"], "100200300", "example_streamer", "Example_Streamer")
+    d.link_twitch(by["New"], "777", "quiet_one", "Quiet_One")
+    t_now = int(time.time())
+    d.store_twitch_status([(by["Old"], t_now, 1, "Evening Stream", "Supermarket Together", 7, t_now - 60),
+                           (by["New"], t_now, 0, None, None, None, None)])
+    app.reload()
+    twc = {app.tree.set(i, "gamertag"): (app.tree.set(i, "twitch"), app.tree.item(i, "image")) for i in app.tree.get_children()}
+    assert twc["Old"][0] == "LIVE 7 - Example_Streamer" and twc["Old"][1]        # Twitch says live: text and icon
+    assert twc["New"][0] == "Quiet_One" and not twc["New"][1]                 # linked but offline: name only, no icon
+    assert twc["New2"][0] == ""                                               # nothing saved: empty
+    app.sort_by("twitch")
+    assert names()[:2] == ["Old", "New"]                                      # live first, then linked, then the rest
+    app.sort_by("gamertag")
+    opened = []
+    monkeypatch.setattr(ui.webbrowser, "open", lambda url, *a, **k: opened.append(url))
+    app.tree.selection_set(str(by["Old"]))
+    app.open_twitch_selected()
+    assert opened == ["https://www.twitch.tv/example_streamer"]
+    app.twitch_check_now = lambda *a, **k: None                                # no network in these steps
+    app._on_twitch_link(by["New2"], tw_mod.TwitchUser("55", "new_two", "New_Two"), None)
+    assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "55"
+    app._on_twitch_link(by["Old"], None, "Twitch has no channel named 'x'.")  # a failed lookup changes nothing
+    assert app.status_error and d.twitch_links([by["Old"]])[0]["twitch_id"] == "100200300"
+    app.twitch_setup_dialog()                                                  # setup window: builds, reports, saves
+    setup = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    assert "Not set up yet" in setup.state_var.get()
+    app._on_twitch_setup("cid", "sec", "Twitch rejected the client ID or secret.")
+    assert "Not saved" in setup.state_var.get() and not app.tcreds.configured()
+    app._on_twitch_setup("cid", "sec", None)
+    assert app.tcreds.configured() and not setup.winfo_exists()
+    app.tclient.http = lambda url, data, headers, form=False: (
+        {"access_token": "t", "expires_in": 5000} if url.startswith(tw_mod.TOKEN_URL) else
+        {"data": [{"user_id": "100200300", "user_login": "example_streamer", "type": "live", "viewer_count": 7,
+                   "game_name": "Supermarket Together", "title": "Evening Stream", "started_at": "2026-10-26T18:59:15Z"}]})
     # "Check live" on selected players: asks Xbox, shows the Twitch icon and a results window
     import time as _t
     app.live.http = lambda url, data, headers, form=False: {"content": {"people": [
         {"xuid": x, "presenceState": "Online", "presenceText": "Sea of Thieves", "isBroadcasting": True,
          "broadcast": {"provider": "Twitch", "viewerCount": 9}} for x in url.rsplit("/", 1)[1].split(",")]}}
-    app.tree.selection_set([i for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New"])
+    app.tree.selection_set([i for i in app.tree.get_children() if app.tree.set(i, "gamertag") in ("New", "Old")])
     app.check_live_selected()
     end = _t.time() + 5
     while "livecheck" in app.busy and _t.time() < end:
@@ -360,10 +397,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert "livecheck" not in app.busy
     dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
     values = dlg.results_tv.item(dlg.results_tv.get_children()[0], "values")
-    assert values[0] == "New" and "LIVE on Twitch" in values[2] and str(values[3]) == "9"
+    assert values[0] == "New" and "LIVE on Twitch" in values[2] and "9 viewers" in values[2]
+    assert values[3] == "Quiet_One: offline"                         # Twitch column for a linked, offline player
+    rows = {dlg.results_tv.item(i, "values")[0]: dlg.results_tv.item(i, "values") for i in dlg.results_tv.get_children()}
+    assert rows["Old"][3] == "LIVE: Supermarket Together - Evening Stream (7 viewers)"
     icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
     assert icons["New"]                                              # the icon appeared for the confirmed player
     dlg.destroy()
+    app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()
     assert not app.live_busy

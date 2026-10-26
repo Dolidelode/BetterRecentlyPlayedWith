@@ -14,8 +14,23 @@ from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, Provi
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
+from .twitch import CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, TwitchClient, TwitchCreds
 
 MIN_INTERVAL = 30
+
+
+class _MemCreds:
+    """Credentials held in memory only, used to test a client ID/secret before anything is saved."""
+
+    def __init__(self, cid, secret):
+        self._c = (cid, secret)
+
+    def load(self):
+        return self._c
+
+
+def twitch_live(a, now) -> bool:
+    return bool(a["twitch_live"]) and a["twitch_checked"] is not None and now - a["twitch_checked"] <= STATUS_MAX_AGE
 
 
 def fmt_ts(ts) -> str:
@@ -68,12 +83,18 @@ class App:
         self.busy = set()          # names of running background jobs (drives the spinner)
         self.to_top_after_sync = False
         self.live = LiveChecker(db, self.xkey)
+        self.tcreds = TwitchCreds(data_dir() / "twitch.json")
+        self.tclient = TwitchClient(self.tcreds)
+        self.tcheck = TwitchChecker(db, self.tclient)
+        self.twitch_after_id = None
+        self.twitch_busy = False
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.reload()
         self.root.after(200, self._poll)
         self._schedule()
         self._schedule_live(15_000)
+        self._schedule_twitch(20_000)
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         if db.get_setting("auto_update_check", "1") == "1":
@@ -138,8 +159,8 @@ class App:
     def _build(self):
         r = self.root
         r.title(f"Better Recently Played With {__version__}")
-        r.geometry("820x520")
-        r.minsize(640, 360)
+        r.geometry("1000x540")
+        r.minsize(760, 380)
         self._apply_style()
         self._apply_icon()
 
@@ -177,6 +198,7 @@ class App:
         self.acct_box.bind("<<ComboboxSelected>>", lambda e: self.switch_account())
         ttk.Button(acct, text="Add account...", command=self.set_key).pack(side="left")
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
+        ttk.Button(acct, text="Twitch setup...", command=self.twitch_setup_dialog).pack(side="right")
         self._refresh_accounts()
 
         self.players_tab = ttk.Frame(r)
@@ -195,15 +217,15 @@ class App:
         ttk.Button(bar2, text="Import...", command=self.import_dialog).pack(side="left", padx=4)
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
-        cols = ("gamertag", "xuid", "tags", "last_seen", "origin", "current")
+        cols = ("gamertag", "xuid", "tags", "twitch", "last_seen", "origin", "current")
         self.tree = ttk.Treeview(self.players_tab, columns=cols, show="tree headings", selectmode="extended")
-        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "tags": "Tags",
+        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "tags": "Tags", "twitch": "Twitch",
                            "last_seen": "Last seen by app", "origin": "Source", "current": "Xbox list #"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
         self.tree.column("#0", width=34, minwidth=34, stretch=False, anchor="center")  # Twitch icon, only when live
         self.tree.heading("#0", text="")
-        for c, w in (("gamertag", 180), ("xuid", 140), ("tags", 140), ("last_seen", 125), ("origin", 60),
-                     ("current", 100)):
+        for c, w in (("gamertag", 170), ("xuid", 130), ("tags", 110), ("twitch", 190), ("last_seen", 115),
+                     ("origin", 55), ("current", 90)):
             self.tree.heading(c, command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=w, anchor="w")
         self._update_headings()
@@ -221,16 +243,18 @@ class App:
         bar3.pack(fill="x", padx=8, pady=4)
         ttk.Button(bar3, text="Open SOTREP", command=self.open_selected).pack(side="left")
         ttk.Button(bar3, text="Tag...", command=self.tag_selected).pack(side="left", padx=4)
-        ttk.Button(bar3, text="Remove tag...", command=self.untag_selected).pack(side="left")
-        ttk.Button(bar3, text="Encounters...", command=self.encounters_dialog).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Untag", command=self.untag_selected).pack(side="left")
+        ttk.Button(bar3, text="Encounters", command=self.encounters_dialog).pack(side="left", padx=4)
         ttk.Button(bar3, text="Check live", command=self.check_live_selected).pack(side="left")
+        ttk.Button(bar3, text="Twitch...", command=self.link_twitch_selected).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Open Twitch", command=self.open_twitch_selected).pack(side="left")
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
         legend.pack(side="right", padx=(0, 10))
         self.legend = legend
         self.live_status = tk.StringVar(value="")
-        ttk.Label(bar3, image=self.twitch_img, text=" broadcasting (Xbox)", compound="left",
+        ttk.Label(bar3, image=self.twitch_img, text=" live now", compound="left",
                   style="Hint.TLabel").pack(side="right", padx=(0, 10))
 
         self.status = tk.StringVar()
@@ -255,6 +279,8 @@ class App:
         "gamertag": lambda a: a["gamertag"].casefold(),
         "xuid": lambda a: int(a["xuid"]) if a["xuid"] else -1,
         "tags": lambda a: (a["tags"] or "").casefold(),
+        "twitch": lambda a: (0 if twitch_live(a, time.time()) else 1 if a["twitch_name"] else 2,
+                             (a["twitch_name"] or "").casefold()),
         "last_seen": lambda a: (a["last_seen"], -(a["pos"] if a["pos"] is not None else 10 ** 9)),
         "origin": lambda a: a["source"],
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
@@ -276,15 +302,22 @@ class App:
                                     for i in self.tree.selection()}
         top = 0.0 if to_top else self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
-        live_ids = {r["id"] for r in self.live.live_now()}   # Xbox-confirmed Twitch broadcasts, fresh only
+        live_ids = {r["id"] for r in self.live.live_now()}   # Xbox says broadcasting (fresh results only)
+        now = time.time()
         rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()),
                       key=self.SORT_KEYS[self.sort_col], reverse=self.sort_desc)
         for n, a in enumerate(rows):
             friend = a["relation"] in ("Friend", "In your list")
+            tw_live = twitch_live(a, now)                    # exact: Twitch itself says this saved channel is live
+            if tw_live:
+                v = a["twitch_viewers"]
+                tw_text = f"LIVE {v} - {a['twitch_name']}" if v is not None else f"LIVE - {a['twitch_name']}"
+            else:
+                tw_text = a["twitch_name"] or ""
             iid = self.tree.insert(
-                "", "end", iid=str(a["id"]), image=self.twitch_img if a["id"] in live_ids else "",
+                "", "end", iid=str(a["id"]), image=self.twitch_img if (a["id"] in live_ids or tw_live) else "",
                 tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()), values=(
-                    a["gamertag"], a["xuid"] or "", a["tags"] or "", fmt_ts(a["last_seen"]),
+                    a["gamertag"], a["xuid"] or "", a["tags"] or "", tw_text, fmt_ts(a["last_seen"]),
                     "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
                     str(a["pos"] + 1) if a["pos"] is not None else ""))
             if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
@@ -356,7 +389,7 @@ class App:
         win.bind("<Escape>", lambda e: win.destroy())
         self._place_dialog(win)
         self.root.wait_window(win)
-        return result["v"] or None
+        return result["v"]
 
     def tag_selected(self):
         ids = self._selected_ids()
@@ -431,21 +464,204 @@ class App:
         win.summary_tv, win.log_tv = sm, tv          # kept for tests
         self._place_dialog(win, 860, 470)
 
+    # ---- optional Twitch section ----
+    def twitch_setup_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Twitch setup (optional)")
+        win.configure(bg=self.pal["bg"])
+        win.transient(self.root)
+        self._twitch_win = win
+        creds = self.tcreds.load()
+        ttk.Label(win, style="Hint.TLabel", wraplength=520, justify="left", text=(
+            "Optional. With your own free Twitch application the app can check whether players you linked to a "
+            "Twitch channel are live, with title, game and viewers.\n\n"
+            "1. Open the Twitch developer console, choose 'Register Your Application'.\n"
+            "2. Any name, OAuth Redirect URL http://localhost, category 'Other', client type 'Confidential'.\n"
+            "3. Copy the Client ID and create a New Secret, then paste both here.\n\n"
+            "They are stored only on this PC (in your app-data folder), never in the repository or the program file.")
+        ).pack(fill="x", padx=14, pady=(14, 6))
+        ttk.Button(win, text="Open Twitch developer console", command=lambda: webbrowser.open(CONSOLE_URL)).pack(pady=4)
+        form = ttk.Frame(win)
+        form.pack(padx=14, pady=6)
+        ttk.Label(form, text="Client ID").grid(row=0, column=0, sticky="w", pady=3)
+        cid_var, sec_var = tk.StringVar(), tk.StringVar()
+        cid_entry = ttk.Entry(form, textvariable=cid_var, width=44)
+        cid_entry.grid(row=0, column=1, padx=8)
+        ttk.Label(form, text="Client secret").grid(row=1, column=0, sticky="w", pady=3)
+        sec_entry = ttk.Entry(form, textvariable=sec_var, width=44, show="*")
+        sec_entry.grid(row=1, column=1, padx=8)
+        state = tk.StringVar(value=(f"Saved on this PC (client ID {creds[0][:6]}...). Paste new values to replace them."
+                                    if creds else "Not set up yet."))
+        status = ttk.Label(win, textvariable=state, style="Hint.TLabel", wraplength=520, justify="left")
+        status.pack(fill="x", padx=14, pady=4)
+        row = ttk.Frame(win)
+        row.pack(pady=(4, 14))
+
+        def save():
+            cid, sec = cid_var.get().strip(), sec_var.get().strip()
+            if not cid or not sec:
+                return state.set("Paste both the client ID and the client secret.")
+            state.set("Testing with Twitch...")
+            self._set_busy("twitchsetup", True)
+
+            def work():
+                try:
+                    probe = TwitchClient(_MemCreds(cid, sec), http=self.tclient.http)
+                    probe.token(force=True)
+                    self.q.put(("twitch_setup", (cid, sec, None)))
+                except ProviderError as e:
+                    self.q.put(("twitch_setup", (cid, sec, str(e))))
+                except Exception as e:
+                    self.q.put(("twitch_setup", (cid, sec, f"Unexpected error: {e}")))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def remove():
+            self.tcreds.clear()
+            self.tclient._token_value = None
+            state.set("Keys removed from this PC.")
+            self.reload()
+
+        ttk.Button(row, text="Save and test", command=save).pack(side="left", padx=4)
+        ttk.Button(row, text="Remove keys", command=remove).pack(side="left", padx=4)
+        ttk.Button(row, text="Close", command=win.destroy).pack(side="left", padx=4)
+        win.state_var = state                        # kept for tests and for showing results
+        cid_entry.focus_set()
+        self._place_dialog(win, 560, 470)
+
+    def _on_twitch_setup(self, cid, secret, err):
+        self._set_busy("twitchsetup", False)
+        win = getattr(self, "_twitch_win", None)
+        alive = win is not None and win.winfo_exists()
+        if err:
+            if alive:
+                win.state_var.set(f"Not saved: {err}")
+            return self.set_status(f"Twitch setup failed: {err}", error=True)
+        self.tcreds.save(cid, secret)
+        self.tclient._token_value = None
+        if alive:
+            win.destroy()
+        self.set_status("Twitch keys saved on this PC. Select a player and press 'Twitch...' to link a channel.")
+        self.twitch_check_now(manual=True)
+
+    def link_twitch_selected(self):
+        ids = self._selected_ids()
+        if len(ids) != 1:
+            return messagebox.showinfo("Twitch", "Select exactly one player to link a Twitch channel.")
+        if not self.tcreds.configured():
+            messagebox.showinfo("Twitch", "Twitch is not set up yet. Opening 'Twitch setup...'.")
+            return self.twitch_setup_dialog()
+        aid = ids[0]
+        gamertag = self.tree.set(str(aid), "gamertag")
+        cur = self.db.twitch_links([aid])
+        name = self._ask_tag(
+            "Link Twitch", f"Twitch channel for {gamertag}\n(name, @name or twitch.tv link; empty removes the link)"
+            + (f"\nCurrently: {cur[0]['display_name']}" if cur else ""), [], True)
+        if name is None:
+            return
+        if name == "":
+            if cur and messagebox.askyesno("Twitch", f"Remove the Twitch link of {gamertag}?"):
+                self.db.unlink_twitch([aid])
+                self.reload()
+            return
+        self._set_busy("twitchlink", True)
+        self.set_status(f"Asking Twitch about '{name}'...")
+
+        def work():
+            try:
+                self.q.put(("twitch_link", (aid, self.tclient.resolve(name), None)))
+            except ValueError as e:
+                self.q.put(("twitch_link", (aid, None, str(e))))
+            except ProviderError as e:
+                self.q.put(("twitch_link", (aid, None, str(e))))
+            except Exception as e:
+                self.q.put(("twitch_link", (aid, None, f"Unexpected error: {e}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_twitch_link(self, account_id, user, err):
+        self._set_busy("twitchlink", False)
+        if err:
+            return self.set_status(f"Could not link Twitch: {err}", error=True)
+        self.db.link_twitch(account_id, user.id, user.login, user.display_name)
+        self.set_status(f"Linked to Twitch channel {user.display_name} (ID {user.id}).")
+        self.reload()
+        self.twitch_check_now(manual=True)
+
+    def open_twitch_selected(self):
+        links = self.db.twitch_links(self._selected_ids())
+        if not links:
+            return self.set_status("Select a player that has a Twitch channel linked.", error=True)
+        for l in links:
+            webbrowser.open(f"https://www.twitch.tv/{l['login']}")
+
+    def twitch_check_now(self, manual=False):
+        if self.twitch_busy or not self.tcreds.configured() or not self.db.twitch_links():
+            return
+        self.twitch_busy = True
+        self._set_busy("twitch", True)
+
+        def work():
+            try:
+                self.q.put(("twitch", (self.tcheck.check_accounts(), None, manual)))
+            except ProviderError as e:
+                self.q.put(("twitch", ({}, str(e), manual)))
+            except Exception as e:
+                self.q.put(("twitch", ({}, f"Unexpected error: {e}", manual)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_twitch(self, result, err, manual):
+        self.twitch_busy = False
+        self._set_busy("twitch", False)
+        if err:
+            return self.set_status(f"Twitch check failed: {err}", error=True)
+        if manual:
+            live_n = sum(1 for v in result.values() if v["live"])
+            self.set_status(f"Twitch: {live_n} of {len(result)} linked player(s) live.")
+        self.reload()
+
+    def _schedule_twitch(self, delay_ms=CHECK_EVERY * 1000):
+        if self.twitch_after_id:
+            self.root.after_cancel(self.twitch_after_id)
+            self.twitch_after_id = None
+        if not self.closing:
+            self.twitch_after_id = self.root.after(delay_ms, self._twitch_tick)
+
+    def _twitch_tick(self):
+        self.twitch_after_id = None
+        if not self.paused:
+            self.twitch_check_now()
+        self._schedule_twitch()
+
+
     # ---- on-demand live check ----
     def check_live_selected(self):
         ids = self._selected_ids()
         if not ids:
             return messagebox.showinfo("Check live", "Select one or more players first (up to 20 at a time).")
-        if not self.xkey.get():
+        if not self.xkey.get() and not (self.tcreds.configured() and self.db.twitch_links(ids)):
             return self.set_status("Add an OpenXBL account first.", error=True)
         if "livecheck" in self.busy:
             return
         self._set_busy("livecheck", True)
-        self.set_status(f"Checking {min(len(ids), 20)} selected player(s) with Xbox...")
+        self.set_status(f"Checking {min(len(ids), 20)} selected player(s)...")
 
         def work():
             try:
-                self.q.put(("livecheck", (self.live.check_accounts(ids), None)))
+                results = self.live.check_accounts(ids) if self.xkey.get() else self._blank_results(ids)
+                tw, tw_err = {}, None
+                links = {l["account_id"]: l for l in self.db.twitch_links(ids)}
+                if links and self.tcreds.configured():
+                    try:
+                        tw = self.tcheck.check_accounts(ids)
+                    except ProviderError as e:
+                        tw_err = str(e)
+                for r in results:
+                    r["tw"], r["tw_err"], r["tw_link"] = tw.get(r["id"]), tw_err, links.get(r["id"])
+                    if r["tw_link"] is not None:
+                        r["tw_link"] = dict(r["tw_link"])
+                self.q.put(("livecheck", (results, None)))
             except ProviderError as e:
                 self.q.put(("livecheck", ([], str(e))))
             except Exception as e:  # never let a worker thread die silently
@@ -453,46 +669,76 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _blank_results(self, ids):
+        rows = self.db.conn.execute(
+            f"SELECT id, gamertag FROM accounts WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        return [{"id": r["id"], "gamertag": r["gamertag"], "state": None, "title": None, "seen_at": None,
+                 "broadcasting": False, "provider": None, "twitch": False, "viewers": None, "started": None,
+                 "error": "no OpenXBL account added"} for r in rows]
+
+    @staticmethod
+    def _twitch_text(r) -> str:
+        link, tw = r.get("tw_link"), r.get("tw")
+        if link is None:
+            return "no Twitch channel saved"
+        if r.get("tw_err"):
+            return f"{link['display_name']}: {r['tw_err']}"
+        if tw is None:
+            return f"{link['display_name']}: not checked"
+        if tw["live"]:
+            title = (tw.get("title") or "")[:60]
+            return f"LIVE: {tw.get('game') or 'no game set'} - {title} ({tw.get('viewers', 0)} viewers)"
+        return f"{link['display_name']}: offline"
+
     def _show_live_results(self, results):
         win = tk.Toplevel(self.root)
         win.title("Live check results")
         win.configure(bg=self.pal["bg"])
-        ttk.Label(win, style="Hint.TLabel", wraplength=840, justify="left", text=(
-            "Straight from Xbox for each selected player, right now (Xbox's own broadcasting flag for that exact "
-            "account). Xbox names the service only when its broadcast record does, and never gives the channel "
-            "or stream title. Offline players cannot be broadcasting.")).pack(fill="x", padx=10, pady=(10, 4))
-        cols = ("player", "state", "broadcast", "viewers", "game")
+        ttk.Label(win, style="Hint.TLabel", wraplength=940, justify="left", text=(
+            "Xbox column: Xbox's own broadcasting flag for that exact account. Xbox misses streams started from a PC "
+            "and never gives the channel or title. Twitch column: only for players you linked to a channel, straight "
+            "from Twitch (exact channel ID). Double-click a row to open its Twitch channel.")
+        ).pack(fill="x", padx=10, pady=(10, 4))
+        cols = ("player", "state", "broadcast", "twitch", "game")
         tv = ttk.Treeview(win, columns=cols, show="headings", height=min(max(len(results), 1), 10))
-        for c, t, w in (("player", "Player", 160), ("state", "Xbox says", 75), ("broadcast", "Broadcasting", 340),
-                        ("viewers", "Viewers", 60), ("game", "Playing / last online", 190)):
+        for c, t, w in (("player", "Player", 150), ("state", "Xbox says", 70), ("broadcast", "Xbox broadcasting", 250),
+                        ("twitch", "Twitch", 360), ("game", "Playing / last online", 150)):
             tv.heading(c, text=t)
             tv.column(c, width=w, anchor="w")
         tv.tag_configure("live", background=self.pal["friend"])
-        for r in results:
+        logins = {}
+        for n, r in enumerate(results):
             if r["error"]:
-                twitch, state, game = f"not checked: {r['error']}", "-", ""
+                bcast, state, game = f"not checked: {r['error']}", "-", ""
             else:
                 state = r["state"]
                 since = f", since {time.strftime('%H:%M', time.localtime(r['started']))}" if r.get("started") else ""
+                views = f", {r['viewers']} viewers" if r.get("viewers") is not None else ""
                 if r["twitch"]:
-                    twitch = f"LIVE on Twitch (Xbox's broadcast record says Twitch{since})"
+                    bcast = f"LIVE on Twitch (Xbox's record says Twitch{since}{views})"
                 elif r["broadcasting"]:
-                    twitch = f"BROADCASTING per Xbox ({r['provider'] or 'service not stated'}{since})"
+                    bcast = f"BROADCASTING per Xbox ({r['provider'] or 'service not stated'}{since}{views})"
                 else:
-                    twitch = "not broadcasting"
+                    bcast = "not broadcasting"
                 game = r["title"] or ""
-            tv.insert("", "end", tags=("live",) if r["broadcasting"] or r["twitch"] else (), values=(
-                r["gamertag"], state or "", twitch, r["viewers"] if r["viewers"] is not None else "", game))
+            tw = r.get("tw")
+            is_live = bool(r["broadcasting"] or r["twitch"] or (tw and tw["live"]))
+            iid = tv.insert("", "end", tags=("live",) if is_live else (), values=(
+                r["gamertag"], state or "", bcast, self._twitch_text(r), game))
+            if r.get("tw_link"):
+                logins[iid] = r["tw_link"]["login"]
+        tv.bind("<Double-1>", lambda e: [webbrowser.open(f"https://www.twitch.tv/{logins[i]}")
+                                         for i in tv.selection() if i in logins])
         tv.pack(fill="both", expand=True, padx=10, pady=(4, 10))
         win.results_tv = tv                          # kept for tests
-        self._place_dialog(win, 880, 130 + 26 * min(max(len(results), 1), 10))
+        self._place_dialog(win, 1000, 140 + 26 * min(max(len(results), 1), 10))
 
     def _on_livecheck(self, results, err):
         self._set_busy("livecheck", False)
         if err:
             return self.set_status(f"Live check failed: {err}", error=True)
-        live_n = sum(1 for r in results if r["broadcasting"] or r["twitch"])
-        self.set_status(f"Live check: {len(results)} player(s) asked, {live_n} broadcasting according to Xbox.")
+        live_n = sum(1 for r in results if r["broadcasting"] or r["twitch"] or (r.get("tw") and r["tw"]["live"]))
+        self.set_status(f"Live check: {len(results)} player(s) asked, {live_n} live.")
         self.reload()                                # shows the Twitch icon for anyone confirmed live
         self._show_live_results(results)
 
@@ -592,6 +838,7 @@ class App:
         self.set_status(f"Refreshing as {who}...")
         if manual:
             self.live_check_now()
+            self.twitch_check_now(manual=False)
         self._set_busy("sync", True)
         self.sync.run_async(prov, lambda out: self.q.put(("sync", out)))
 
@@ -638,6 +885,12 @@ class App:
                     self.reload()          # shows or removes the Twitch icons
                 elif kind == "livecheck":
                     self._on_livecheck(*val)
+                elif kind == "twitch":
+                    self._on_twitch(*val)
+                elif kind == "twitch_link":
+                    self._on_twitch_link(*val)
+                elif kind == "twitch_setup":
+                    self._on_twitch_setup(*val)
                 elif kind == "acct_added":
                     self._set_busy("key", False)
                     name = self.xkey.add(*val)
@@ -703,6 +956,9 @@ class App:
         if self.live_after_id:
             self.root.after_cancel(self.live_after_id)
             self.live_after_id = None
+        if self.twitch_after_id:
+            self.root.after_cancel(self.twitch_after_id)
+            self.twitch_after_id = None
         if self.after_id:
             self.root.after_cancel(self.after_id)
             self.after_id = None
