@@ -161,13 +161,13 @@ class App:
         ttk.Button(bar2, text="Import...", command=self.import_dialog).pack(side="left", padx=4)
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
-        cols = ("gamertag", "xuid", "person", "last_seen", "origin", "current")
+        cols = ("gamertag", "xuid", "person", "friend", "last_seen", "origin", "current")
         self.tree = ttk.Treeview(self.players_tab, columns=cols, show="headings", selectmode="extended")
-        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)",
+        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "person": "Person (your group)", "friend": "Friend?",
                            "last_seen": "Last seen by app", "origin": "Source", "current": "Xbox list #"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
-        for c, w in (("gamertag", 190), ("xuid", 150), ("person", 140), ("last_seen", 130), ("origin", 70),
-                     ("current", 85)):
+        for c, w in (("gamertag", 180), ("xuid", 140), ("person", 130), ("friend", 90), ("last_seen", 125),
+                     ("origin", 60), ("current", 80)):
             self.tree.heading(c, command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=w, anchor="w")
         self._update_headings()
@@ -206,12 +206,13 @@ class App:
         ttk.Label(lt, style="Hint.TLabel", wraplength=740, justify="left", text=(
             "A player is listed only when Xbox itself reports an active Twitch broadcast for that exact account "
             "(no name guessing). Xbox does not share the Twitch channel or stream title, so none is shown. "
-            f"Automatic: every 5 minutes it checks your {LIVE_SCOPE} most recent teammates from Xbox's current list. "
+            f"Automatic: every 5 minutes it checks the {LIVE_SCOPE} most recent players from Xbox's current list (not all are teammates). "
             f"Each check costs one OpenXBL request (at most {HOURLY_BUDGET} per hour; offline players are only "
             "re-checked every 3 hours).")).pack(fill="x", padx=10, pady=(0, 6))
-        cols = ("gamertag", "where", "viewers", "since", "checked")
+        cols = ("gamertag", "friend", "where", "viewers", "since", "checked")
         self.live_tree = ttk.Treeview(lt, columns=cols, show="headings", selectmode="browse")
-        for c, t, w in (("gamertag", "Gamertag", 200), ("where", "Platform", 190), ("viewers", "Viewers", 80),
+        for c, t, w in (("gamertag", "Gamertag", 190), ("friend", "Friend?", 90), ("where", "Platform", 180),
+                        ("viewers", "Viewers", 70),
                         ("since", "Live since", 140), ("checked", "Confirmed at", 140)):
             self.live_tree.heading(c, text=t)
             self.live_tree.column(c, width=w, anchor="w")
@@ -232,6 +233,7 @@ class App:
         "gamertag": lambda a: a["gamertag"].casefold(),
         "xuid": lambda a: int(a["xuid"]) if a["xuid"] else -1,
         "person": lambda a: (a["person"] or "").casefold(),
+        "friend": lambda a: ("Friend", "You follow", "Follows you", "In your list", "").index(a["relation"] or ""),
         "last_seen": lambda a: (a["last_seen"], -(a["pos"] if a["pos"] is not None else 10 ** 9)),
         "origin": lambda a: a["source"],
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
@@ -252,11 +254,11 @@ class App:
         sel = {self.tree.set(i, "xuid") + "|" + self.tree.set(i, "gamertag") for i in self.tree.selection()}
         top = self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
-        rows = sorted(self.db.list_accounts(self.search.get()), key=self.SORT_KEYS[self.sort_col],
+        rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()), key=self.SORT_KEYS[self.sort_col],
                       reverse=self.sort_desc)
         for n, a in enumerate(rows):
             iid = self.tree.insert("", "end", iid=str(a["id"]), tags=("odd",) if n % 2 else (), values=(
-                a["gamertag"], a["xuid"] or "", a["person"] or "", fmt_ts(a["last_seen"]),
+                a["gamertag"], a["xuid"] or "", a["person"] or "", a["relation"] or "", fmt_ts(a["last_seen"]),
                 "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
                 str(a["pos"] + 1) if a["pos"] is not None else ""))
             if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
@@ -470,9 +472,10 @@ class App:
     def reload_live(self):
         self.live_tree.delete(*self.live_tree.get_children())
         rows = self.live.live_now()
+        rel = self.db.friend_relations(self.xkey.active())
         for r in rows:
             self.live_tree.insert("", "end", iid=str(r["id"]), values=(
-                r["gamertag"], "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
+                r["gamertag"], rel.get(r["xuid"], ""), "Twitch (confirmed by Xbox)", r["viewers"] if r["viewers"] is not None else "n/a",
                 fmt_ts(r["started"]), fmt_ts(r["checked_at"])))
         if rows:
             self.live_empty.pack_forget()

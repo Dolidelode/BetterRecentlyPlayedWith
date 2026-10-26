@@ -76,7 +76,14 @@ def _m3(c: sqlite3.Connection) -> None:
     migrate_live_table(c)
 
 
-MIGRATIONS = [_m1, _m2, _m3]  # index i migrates user_version i -> i+1
+def _m4(c: sqlite3.Connection) -> None:
+    # Who is a friend depends on which Xbox account (OpenXBL account name) the app is syncing as.
+    c.execute("""CREATE TABLE friends(
+        owner TEXT NOT NULL, xuid TEXT NOT NULL, relation TEXT NOT NULL,
+        PRIMARY KEY(owner, xuid))""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -253,22 +260,37 @@ class Database:
         return res
 
     # ---- queries ----
-    def list_accounts(self, search: str = "") -> List[sqlite3.Row]:
+    def list_accounts(self, search: str = "", owner: Optional[str] = None) -> List[sqlite3.Row]:
         q = """SELECT a.id, a.xuid, a.gamertag, a.last_seen, a.first_seen, a.person_id,
                       p.name AS person, a.source,
                       (SELECT COUNT(*) FROM encounters e WHERE e.account_id=a.id) AS encounters,
                       EXISTS(SELECT 1 FROM latest_list l WHERE l.account_id=a.id) AS in_latest,
-                      (SELECT l.pos FROM latest_list l WHERE l.account_id=a.id) AS pos
-               FROM accounts a LEFT JOIN people p ON p.id=a.person_id"""
-        args: list = []
+                      (SELECT l.pos FROM latest_list l WHERE l.account_id=a.id) AS pos,
+                      f.relation AS relation
+               FROM accounts a LEFT JOIN people p ON p.id=a.person_id
+               LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?"""
+        args: list = [owner]
         if search.strip():
             like = f"%{search.strip().casefold()}%"
             q += (" WHERE a.gamertag_key LIKE ? OR IFNULL(a.xuid,'') LIKE ?"
                   " OR IFNULL(p.name,'') LIKE ? COLLATE NOCASE")
-            args = [like, like, like]
+            args += [like, like, like]
         q += " ORDER BY a.last_seen DESC, pos IS NULL, pos ASC, a.id DESC"
         with self.lock:
             return self.conn.execute(q, args).fetchall()
+
+    # ---- friends (per synced Xbox account) ----
+    def replace_friends(self, owner: str, relations: dict) -> None:
+        with self.lock, self.conn:
+            self.conn.execute("DELETE FROM friends WHERE owner=?", (owner,))
+            self.conn.executemany("INSERT INTO friends(owner,xuid,relation) VALUES(?,?,?)",
+                                  [(owner, x, r) for x, r in relations.items()])
+        self.set_setting("friends_at:" + owner, str(int(time.time())))
+
+    def friend_relations(self, owner: Optional[str]) -> dict:
+        with self.lock:
+            return {r[0]: r[1] for r in self.conn.execute(
+                "SELECT xuid, relation FROM friends WHERE owner=?", (owner,))}
 
     def count_accounts(self) -> int:
         with self.lock:

@@ -370,3 +370,58 @@ def test_palettes_are_valid_hex():
         for k, v in palette(n).items():
             if k != "name":
                 assert re.fullmatch(r"#[0-9a-f]{6}", v), (n, k, v)
+
+
+# ---- friends
+FRIENDS = {"content": {"people": [
+    {"xuid": "1", "isFollowedByCaller": True, "isFollowingCaller": True},
+    {"xuid": "2", "isFollowedByCaller": True, "isFollowingCaller": False},
+    {"xuid": "3", "isFollowedByCaller": False, "isFollowingCaller": True},
+    {"xuid": "4"},
+    {"gamertag": "no xuid"}]}}
+
+
+def test_parse_friends_relations():
+    from brpw.providers import parse_friends
+    assert parse_friends(FRIENDS) == {"1": "Friend", "2": "You follow", "3": "Follows you", "4": "In your list"}
+    with pytest.raises(ProviderError):
+        parse_friends({"content": {}})
+
+
+def test_friend_column_is_exact_and_per_owner(db):
+    db.merge_players([Player("Exact", "1"), Player("Stranger", "9"), Player("Exact", None)], "openxbl", True, now=100)
+    db.replace_friends("Main", {"1": "Friend"})
+    db.replace_friends("Alt", {"9": "You follow"})
+    main = {r["gamertag"] + str(r["xuid"]): r["relation"] for r in db.list_accounts(owner="Main")}
+    assert main["Exact1"] == "Friend" and main["Stranger9"] is None
+    assert main["ExactNone"] is None                       # same name but no XUID: never matched by name
+    alt = {r["gamertag"]: r["relation"] for r in db.list_accounts(owner="Alt")}
+    assert alt["Stranger"] == "You follow" and alt["Exact"] is None
+    assert db.list_accounts(owner=None)[0]["relation"] is None
+    assert [r["gamertag"] for r in db.list_accounts("exa", owner="Main")].count("Exact") == 2   # search still works
+
+
+def test_friends_refresh_is_throttled_and_never_fails_the_sync(tmp_path):
+    from brpw.providers import OpenXblKey, OpenXblProvider
+    d = Database(tmp_path / "p.db")
+    keys = OpenXblKey(tmp_path / "k.json")
+    keys.add("Main", "key")
+    calls = []
+
+    def http(url, data, headers, form=False):
+        calls.append(url)
+        if url.endswith("/friends"):
+            return FRIENDS
+        return {"content": {"recentPlayers": [{"xuid": "1", "gamertag": "A"}]}}
+    svc, prov = SyncService(d), OpenXblProvider(keys, http=http)
+    assert svc.run(prov).ok and svc.run(prov).ok
+    assert sum(u.endswith("/friends") for u in calls) == 1          # second sync within 30 min reuses it
+    assert d.friend_relations("Main")["1"] == "Friend"
+
+    def broken(url, data, headers, form=False):
+        if url.endswith("/friends"):
+            raise ProviderError("friends down")
+        return {"content": {"recentPlayers": [{"xuid": "2", "gamertag": "B"}]}}
+    d.set_setting("friends_at:Main", "0")
+    out = SyncService(d).run(OpenXblProvider(keys, http=broken))
+    assert out.ok and "friends list not updated" in out.message and d.friend_relations("Main")["1"] == "Friend"

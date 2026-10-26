@@ -274,6 +274,33 @@ class OpenXblKey:
             self.legacy.unlink(missing_ok=True)
 
 
+OPENXBL_FRIENDS_URL = "https://api.xbl.io/v2/friends"
+FRIENDS_REFRESH = 30 * 60
+
+
+def parse_friends(payload) -> dict:
+    """xuid -> relation. 'Friend' = you follow them and they follow you back; otherwise one-directional.
+    If OpenXBL omits the follow flags the person is only known to be 'In your list'."""
+    people = (payload.get("content") or {}).get("people") if isinstance(payload, dict) else None
+    if not isinstance(people, list):
+        raise ProviderError("Unexpected friends response from OpenXBL.")
+    out = {}
+    for p in people:
+        x = _xuid(p.get("xuid")) if isinstance(p, dict) else None
+        if not x:
+            continue
+        mine, theirs = p.get("isFollowedByCaller"), p.get("isFollowingCaller")
+        if mine is None and theirs is None:
+            out[x] = "In your list"
+        elif mine and theirs:
+            out[x] = "Friend"
+        elif mine:
+            out[x] = "You follow"
+        else:
+            out[x] = "Follows you"
+    return out
+
+
 class OpenXblProvider(RecentPlayersProvider):
     name = "openxbl"
     live = True
@@ -297,3 +324,14 @@ class OpenXblProvider(RecentPlayersProvider):
             raise
         self.notes = openxbl_stats(payload)
         return parse_openxbl(payload)
+
+    def post_sync(self, db) -> None:
+        """Refresh the friends list for the active account (1 request, at most every 30 min). Failures here
+        never fail the player sync."""
+        owner, key = self.key.active(), self.key.get()
+        if not owner or not key:
+            return
+        last = db.get_setting("friends_at:" + owner)
+        if last and time.time() - int(last) < FRIENDS_REFRESH:
+            return
+        db.replace_friends(owner, parse_friends(self.http(OPENXBL_FRIENDS_URL, None, {"X-Authorization": key})))

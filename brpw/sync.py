@@ -37,8 +37,15 @@ class SyncService:
                 return SyncOutcome(False, f"Unexpected error: {e}", finished_at=now)
             if provider.live:
                 self.db.set_setting("last_sync", str(now))
+            hook, friends_note = getattr(provider, "post_sync", None), ""
+            if hook:
+                try:
+                    hook(self.db)
+                except Exception as e:  # secondary data: report, never fail the sync
+                    friends_note = f" (friends list not updated: {e})"
             note = f" ({getattr(provider, 'notes', '')})" if getattr(provider, "notes", "") else ""
-            return SyncOutcome(True, f"{res.new} new, {res.known} already known{note}", res, finished_at=now)
+            return SyncOutcome(True, f"{res.new} new, {res.known} already known{note}{friends_note}", res,
+                               finished_at=now)
         finally:
             self._lock.release()
 
