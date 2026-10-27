@@ -511,7 +511,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert sw.player_var.get() == "Unlinked Pirate"                    # same-name stream pre-fills the player
     sw.link()
     unl = [r for r in d.list_accounts() if r["gamertag"] == "Unlinked Pirate"][0]
-    assert unl["twitch_id"] == "901"
+    assert unl["twitch_id"] == "901" and sw.player_var.get() == ""   # Player box cleared after linking
     opened.clear()
     sw.streams_tv.selection_set([i for i in sw.streams_tv.get_children()
                                  if sw.streams_tv.item(i, "values")[1] == "Unlinkedpirate"])
@@ -529,6 +529,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         root.update()
         _t.sleep(0.05)
     assert app.status_error and "Similar: Far Away Pirat3" in app.status.get()
+    assert sw.player_var.get() == "far away pirat"                     # a failed lookup keeps what was typed
     sw.player_var.set("far away pirate")
     sw.link()
     end = _t.time() + 5
@@ -537,7 +538,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         _t.sleep(0.05)
     far = [r for r in d.list_accounts() if r["xuid"] == "2535400000000001"][0]
     assert far["gamertag"] == "Far Away Pirate" and far["twitch_id"] == "902" and far["encounters"] == 0
-    assert sw.player_var.get() == "Far Away Pirate"
+    assert sw.player_var.get() == ""                                  # cleared after linking
     sw.destroy()
     # auto matches: the window explains each pair, auto links are labelled in the list
     d.add_match_evidence(by["New2"], "555", "newtwo", "NewTwo", 1, 1, 10)

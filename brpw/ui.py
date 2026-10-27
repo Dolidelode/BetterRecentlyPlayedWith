@@ -888,6 +888,7 @@ class App:
                 return self.set_status(str(e), error=True)
             linked[s["id"]] = a["id"]
             self.set_status(f"Linked {a['gamertag']} to Twitch channel {s['name']}.")
+            pvar.set("")                                                              # ready for the next one
             fill()
             tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])     # keep the stream selected
             self.reload()
@@ -919,8 +920,6 @@ class App:
                 acc = {"id": aid, "gamertag": player.gamertag}
                 by_tag[player.gamertag] = acc
                 tag_of[aid] = player.gamertag
-                if win.winfo_exists():
-                    pvar.set(player.gamertag)
                 try:
                     self.db.link_twitch(aid, s["id"], s["login"], s["name"])
                 except ValueError as e:
@@ -928,6 +927,7 @@ class App:
                 linked[s["id"]] = aid
                 self.set_status(f"Added {player.gamertag} (Xbox ID {player.xuid}) and linked Twitch channel {s['name']}.")
                 if win.winfo_exists():
+                    pvar.set("")                                                      # ready for the next one
                     fill()
                     tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])
                 self.reload()
