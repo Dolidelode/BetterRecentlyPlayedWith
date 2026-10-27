@@ -188,6 +188,7 @@ def test_export(db, tmp_path):
 def test_sotrep_links():
     assert sotrep.profile_url("Cool Pirate") == "https://www.sotrep.com/search/xbox-cool-pirate"
     assert sotrep.slug("Weird_Name#1234!") == "xbox-weirdname1234"
+    assert sotrep.twitch_search_url(" Example_Streamer ") == "https://www.sotrep.com/search/twitch-example-streamer"
 
 
 # ---- providers
@@ -483,6 +484,11 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     sw.link()
     unl = [r for r in d.list_accounts() if r["gamertag"] == "Unlinked Pirate"][0]
     assert unl["twitch_id"] == "901"
+    opened.clear()
+    sw.streams_tv.selection_set([i for i in sw.streams_tv.get_children()
+                                 if sw.streams_tv.item(i, "values")[1] == "Unlinkedpirate"])
+    sw.find_on_sotrep()
+    assert opened == ["https://www.sotrep.com/search/twitch-unlinkedpirate"]
     sw.destroy()
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker

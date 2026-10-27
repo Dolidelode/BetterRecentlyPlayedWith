@@ -881,6 +881,7 @@ class App:
             linked[s["id"]] = a["id"]
             self.set_status(f"Linked {a['gamertag']} to Twitch channel {s['name']}.")
             fill()
+            tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])     # keep the stream selected
             self.reload()
             self.twitch_check_now(manual=True)
 
@@ -888,13 +889,19 @@ class App:
             for i in tv.selection():
                 webbrowser.open(f"https://www.twitch.tv/{rows[i]['login']}")
 
+        def find_on_sotrep():
+            for i in tv.selection():
+                webbrowser.open(sotrep.twitch_search_url(rows[i]["login"]))
+
         tv.bind("<Double-1>", lambda e: open_stream())
         ttk.Button(bar, text="Link", command=link).pack(side="left", padx=4)
         ttk.Button(bar, text="Open stream", command=open_stream).pack(side="left", padx=4)
+        ttk.Button(bar, text="Find on SOTREP", command=find_on_sotrep).pack(side="left", padx=4)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
         win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
         win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
+        win.find_on_sotrep = find_on_sotrep
         self._place_dialog(win, 1040, 540)
 
     def never_link_selected(self):
