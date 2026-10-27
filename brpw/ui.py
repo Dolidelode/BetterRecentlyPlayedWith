@@ -14,7 +14,8 @@ from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, Provi
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
-from .twitch import CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, TwitchClient, TwitchCreds
+from .twitch import (CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, TwitchClient, TwitchCreds,
+                     login_candidates)
 
 MIN_INTERVAL = 30
 
@@ -199,6 +200,7 @@ class App:
         ttk.Button(acct, text="Add account...", command=self.set_key).pack(side="left")
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
         ttk.Button(acct, text="Twitch setup...", command=self.twitch_setup_dialog).pack(side="right")
+        ttk.Button(acct, text="Live SoT streams", command=self.sot_streams).pack(side="right", padx=4)
         self._refresh_accounts()
 
         self.players_tab = ttk.Frame(r)
@@ -701,6 +703,144 @@ class App:
         win.guess_tv, win.link_selected = tv, link_selected          # kept for tests
         self._place_dialog(win, 740, 160 + 24 * min(len(sugg), 12))
 
+    def sot_streams(self):
+        """Everyone live in Sea of Thieves on Twitch right now, so the user can spot a streamer they just met."""
+        if not self.tcreds.configured():
+            return self.set_status("Twitch is not set up. Use 'Twitch setup...' first.", error=True)
+        if "sotstreams" in self.busy:
+            return
+        self._set_busy("sotstreams", True)
+        self.set_status("Asking Twitch who is live in Sea of Thieves...")
+
+        def work():
+            try:
+                self.q.put(("sot_streams", (self.tclient.game_streams(), None)))
+            except ProviderError as e:
+                self.q.put(("sot_streams", ([], str(e))))
+            except Exception as e:
+                self.q.put(("sot_streams", ([], f"Unexpected error: {e}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _uptime(started, now) -> str:
+        if not started:
+            return ""
+        m = max(0, int(now - started)) // 60
+        return f"{m // 60}h {m % 60:02d}m"
+
+    def _on_sot_streams(self, streams, err):
+        self._set_busy("sotstreams", False)
+        if err:
+            return self.set_status(f"Live SoT streams failed: {err}", error=True)
+        self.set_status(f"{len(streams)} streams live in Sea of Thieves right now.")
+        old = getattr(self, "sot_win", None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        win = self.sot_win = tk.Toplevel(self.root)
+        win.title(f"Live in Sea of Thieves on Twitch ({len(streams)})")
+        win.configure(bg=self.pal["bg"])
+        accounts = self.db.list_accounts(owner=self.xkey.active())
+        recent = sorted(accounts, key=lambda a: (a["pos"] is None, a["pos"] if a["pos"] is not None else 0))
+        by_tag = {}
+        for a in recent:
+            by_tag.setdefault(a["gamertag"], a)
+        linked = {l["twitch_id"]: l["account_id"] for l in self.db.twitch_links()}
+        tag_of = {a["id"]: a["gamertag"] for a in accounts}
+        same = {}
+        for a in recent:
+            if a["twitch_never"] is None:
+                for c in login_candidates(a["gamertag"]):
+                    same.setdefault(c, a["gamertag"])
+
+        def match(s):
+            if s["id"] in linked:
+                return "linked: " + tag_of.get(linked[s["id"]], "?")
+            return "same name: " + same[s["login"].lower()] if s["login"].lower() in same else ""
+
+        ttk.Label(win, style="Hint.TLabel", wraplength=860, justify="left", text=(
+            "Everyone streaming Sea of Thieves on Twitch now. Just met a streamer? Find them here (filter by name or "
+            "title), pick the player below and press 'Link'. 'same name' is only a guess.")).pack(fill="x", padx=10,
+                                                                                                    pady=(10, 4))
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=10)
+        ttk.Label(top, text="Filter:").pack(side="left")
+        fvar = tk.StringVar()
+        ttk.Entry(top, textvariable=fvar, width=30).pack(side="left", padx=6)
+        box = ttk.Frame(win)
+        box.pack(fill="both", expand=True, padx=10, pady=4)
+        cols = (("match", "Your player", 170), ("channel", "Channel", 150), ("viewers", "Viewers", 60),
+                ("uptime", "Live for", 70), ("lang", "Lang", 45), ("title", "Title", 380))
+        tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=16)
+        for c, t, w in cols:
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="e" if c == "viewers" else "w")
+        tv.tag_configure("match", background=self.pal["friend"])
+        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        rows = {}
+        now = time.time()
+
+        def fill(*_):
+            tv.delete(*tv.get_children())
+            rows.clear()
+            f = fvar.get().strip().casefold()
+            for s in sorted(streams, key=lambda s: (not match(s), -s["viewers"])):
+                m = match(s)
+                if f and f not in s["name"].casefold() and f not in s["title"].casefold() and f not in m.casefold():
+                    continue
+                iid = tv.insert("", "end", tags=("match",) if m else (), values=(
+                    m, s["name"], s["viewers"], self._uptime(s["started"], now), s["language"], s["title"]))
+                rows[iid] = s
+
+        fvar.trace_add("write", fill)
+        fill()
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(4, 10))
+        ttk.Label(bar, text="Player:").pack(side="left")
+        pvar = tk.StringVar()
+        sel = self._selected_ids()
+        if len(sel) == 1 and sel[0] in tag_of:
+            pvar.set(tag_of[sel[0]])
+        ttk.Combobox(bar, textvariable=pvar, values=list(by_tag), width=28).pack(side="left", padx=6)
+
+        def on_pick(_=None):
+            s = rows.get((tv.selection() or [None])[0])
+            if s and s["login"].lower() in same and s["id"] not in linked:
+                pvar.set(same[s["login"].lower()])
+        tv.bind("<<TreeviewSelect>>", on_pick)
+
+        def link():
+            s = rows.get((tv.selection() or [None])[0])
+            a = by_tag.get(pvar.get().strip())
+            if not s:
+                return self.set_status("Select a stream first.", error=True)
+            if not a:
+                return self.set_status("Pick one of your players to link this stream to.", error=True)
+            try:
+                self.db.link_twitch(a["id"], s["id"], s["login"], s["name"])
+            except ValueError as e:
+                return self.set_status(str(e), error=True)
+            linked[s["id"]] = a["id"]
+            self.set_status(f"Linked {a['gamertag']} to Twitch channel {s['name']}.")
+            fill()
+            self.reload()
+            self.twitch_check_now(manual=True)
+
+        def open_stream():
+            for i in tv.selection():
+                webbrowser.open(f"https://www.twitch.tv/{rows[i]['login']}")
+
+        tv.bind("<Double-1>", lambda e: open_stream())
+        ttk.Button(bar, text="Link", command=link).pack(side="left", padx=4)
+        ttk.Button(bar, text="Open stream", command=open_stream).pack(side="left", padx=4)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
+        win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
+        self._place_dialog(win, 900, 520)
+
     def never_link_selected(self):
         """Toggle 'never link a Twitch channel' (cheaters, ...) for the selected players."""
         ids = self._selected_ids()
@@ -1022,6 +1162,8 @@ class App:
                     self._on_twitch_link(*val)
                 elif kind == "twitch_guess":
                     self._on_twitch_guess(*val)
+                elif kind == "sot_streams":
+                    self._on_sot_streams(*val)
                 elif kind == "twitch_setup":
                     self._on_twitch_setup(*val)
                 elif kind == "acct_added":

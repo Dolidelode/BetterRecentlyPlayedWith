@@ -256,6 +256,32 @@ def test_login_candidates():
     assert login_candidates("ab") == [] and login_candidates("") == []
 
 
+def test_game_streams_pages_and_sorts():
+    calls = []
+    pages = {None: (["1", "2"], "c1"), "c1": (["3", "2"], "c2"), "c2": ([], None)}    # "2" moved between pages
+
+    def http(url, data, headers, form=False):
+        calls.append(url)
+        if url.startswith(TOKEN_URL):
+            return {"access_token": "t", "expires_in": 5000}
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if "/games" in url:
+            assert q["name"] == ["Sea of Thieves"]
+            return {"data": [{"id": "490377", "name": "Sea of Thieves"}]}
+        assert q["game_id"] == ["490377"] and q["first"] == ["100"]
+        ids, cur = pages[q.get("after", [None])[0]]
+        return {"data": [{"user_id": i, "user_login": f"s{i}", "user_name": f"S{i}", "type": "live",
+                          "viewer_count": int(i) * 10, "title": "t", "language": "en",
+                          "started_at": "2026-10-26T18:59:15Z"} for i in ids],
+                "pagination": {"cursor": cur} if cur else {}}
+    cl = TwitchClient(Mem(), http=http, now=Clock())
+    out = cl.game_streams()
+    assert [s["id"] for s in out] == ["3", "2", "1"] and out[0]["login"] == "s3" and out[0]["viewers"] == 30
+    assert sum("/streams" in u for u in calls) == 3
+    cl.game_streams(max_pages=1)
+    assert sum("/games" in u for u in calls) == 1                               # category ID looked up once
+
+
 def test_suggest_finds_same_name_channels_and_live_status():
     users = {"examplestreamer": ("100200300", "ExampleStreamer"), "other_one": ("555", "Other_One")}
     live = {"100200300": {"title": "t", "game": "Sea of Thieves", "viewers": 12}}

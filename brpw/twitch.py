@@ -22,6 +22,8 @@ CHUNK = 100                   # Get Streams takes at most 100 user_id values per
 CHECK_EVERY = 120             # seconds between automatic checks while the app is open
 STATUS_MAX_AGE = 10 * 60      # a Twitch status older than this is no longer shown as live
 CONSOLE_URL = "https://dev.twitch.tv/console/apps"
+SOT_GAME = "Sea of Thieves"   # Twitch category name; its ID is looked up once per run
+GAME_PAGES = 10               # at most 1000 live streams per refresh (10 requests)
 
 _RESERVED = {"directory", "videos", "settings", "downloads", "jobs", "turbo", "p", "search", "friends", "subscriptions",
              "inventory", "drops", "wallet", "moderator", "popout", "embed", "u", "login", "signup"}
@@ -92,6 +94,7 @@ class TwitchClient:
         self.creds, self.http, self.now = creds, http, now
         self._token_value: Optional[str] = None
         self._expires = 0.0
+        self._game_ids: Dict[str, str] = {}
 
     def token(self, force: bool = False) -> str:
         creds = self.creds.load()
@@ -168,6 +171,36 @@ class TwitchClient:
                             "viewers": s and s["viewers"],
                             "sot": bool(s) and "sea of thieves" in (s["game"] or "").casefold()})
         return out
+
+    def game_id(self, name: str = SOT_GAME) -> str:
+        if name not in self._game_ids:
+            data = self._get("games", [("name", name)]).get("data") or []
+            if not data:
+                raise ProviderError(f"Twitch has no category named '{name}'.")
+            self._game_ids[name] = str(data[0]["id"])
+        return self._game_ids[name]
+
+    def game_streams(self, name: str = SOT_GAME, max_pages: int = GAME_PAGES) -> List[dict]:
+        """Everyone live in a Twitch category right now, most viewers first (100 per request, at most max_pages)."""
+        gid, out, after = self.game_id(name), [], None
+        for _ in range(max_pages):
+            params = [("game_id", gid), ("first", str(CHUNK))] + ([("after", after)] if after else [])
+            r = self._get("streams", params)
+            for s in r.get("data") or []:
+                if s.get("type", "live") == "live":
+                    out.append({"id": str(s["user_id"]), "login": str(s.get("user_login") or ""),
+                                "name": str(s.get("user_name") or s.get("user_login") or ""),
+                                "title": str(s.get("title") or ""), "viewers": int(s.get("viewer_count") or 0),
+                                "started": _iso_to_epoch(s.get("started_at")), "language": str(s.get("language") or "")})
+            after = (r.get("pagination") or {}).get("cursor")
+            if not after or not r.get("data"):
+                break
+        seen, uniq = set(), []                          # a stream can move between pages while paging
+        for s in sorted(out, key=lambda s: -s["viewers"]):
+            if s["id"] not in seen:
+                seen.add(s["id"])
+                uniq.append(s)
+        return uniq
 
     def streams(self, user_ids: List[str]) -> Dict[str, dict]:
         """user_id -> stream details, for those that are live right now (100 IDs per request)."""
