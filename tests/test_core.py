@@ -391,6 +391,19 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.selection_set(str(by["Old"]))
     app.open_twitch_selected()
     assert opened == ["https://www.twitch.tv/example_streamer"]
+    # clicking the Twitch column or the icon opens Twitch; a double-click elsewhere still opens SOTREP
+    root.update()
+    app.tree.see(str(by["Old"]))
+    root.update()
+    ev = lambda col: type("E", (), {"x": app.tree.bbox(str(by["Old"]), col)[0] + app.tree.bbox(str(by["Old"]), col)[2] // 2,
+                                    "y": app.tree.bbox(str(by["Old"]), col)[1] + 3})()
+    opened.clear()
+    app._on_tree_click(ev("twitch"))
+    app._on_tree_click(ev("#0"))
+    app._on_tree_click(ev("gamertag"))
+    assert opened == ["https://www.twitch.tv/example_streamer"] * 2
+    assert app._twitch_cell(ev("twitch")) and not app._twitch_cell(ev("gamertag"))
+    opened.clear()
     app.twitch_check_now = lambda *a, **k: None                                # no network in these steps
     app._on_twitch_link(by["New2"], tw_mod.TwitchUser("55", "new_two", "New_Two"), None)
     assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "55"

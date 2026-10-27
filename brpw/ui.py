@@ -240,7 +240,8 @@ class App:
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", padx=(0, 8), pady=4)
         self.tree.pack(fill="both", expand=True, padx=(8, 0), pady=4)
-        self.tree.bind("<Double-1>", lambda e: self.open_selected())
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", lambda e: None if self._twitch_cell(e) else self.open_selected())
         self.tree.bind("<Return>", lambda e: self.open_selected())
 
         bar3 = ttk.Frame(self.players_tab)
@@ -332,6 +333,32 @@ class App:
                 self.tree.selection_add(iid)
         self.tree.yview_moveto(top)  # a background refresh must not scroll the list back to the top
         self.count_lbl.configure(text=f"{self.db.count_accounts()} unique accounts")
+
+    def _twitch_cell(self, event):
+        """The row id when the click was on the live icon or in the Twitch column, else None."""
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not row:
+            return None
+        if col == "#0":
+            return row
+        idx = int(col[1:]) - 1 if col.startswith("#") and col[1:].isdigit() else -1
+        cols = self.tree["displaycolumns"]                 # "#n" counts the columns on screen, not all of them
+        if not cols or cols[0] == "#all":
+            cols = self.tree["columns"]
+        return row if 0 <= idx < len(cols) and cols[idx] == "twitch" else None
+
+    def _on_tree_click(self, event):
+        """A click on the Twitch icon or the Twitch column opens that player's Twitch channel."""
+        row = self._twitch_cell(event)
+        if row is None:
+            return
+        links = self.db.twitch_links([int(row)])
+        if links:
+            webbrowser.open(f"https://www.twitch.tv/{links[0]['login']}")
+        elif self.tree.item(row, "image"):
+            self.set_status("Xbox says this player is broadcasting, but no Twitch channel is linked yet. "
+                            "Use 'Twitch...' or 'Live SoT streams' to link it.")
 
     def _selected_ids(self):
         return [int(i) for i in self.tree.selection()]
