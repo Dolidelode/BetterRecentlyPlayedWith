@@ -10,7 +10,7 @@ from . import __version__, sotrep, updater
 from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
-                        lookup_gamertag)
+                        find_gamertag, lookup_gamertag)
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
@@ -760,7 +760,8 @@ class App:
 
         ttk.Label(win, style="Hint.TLabel", wraplength=860, justify="left", text=(
             "Everyone streaming Sea of Thieves on Twitch now. Just met a streamer? Find them here (filter by name or "
-            "title), pick the player below and press 'Link'. 'same name' is only a guess. Click a column to sort.")).pack(fill="x", padx=10,
+            "title), pick the player below or type any Xbox gamertag (e.g. from 'Find on SOTREP') and press 'Link'. "
+            "'same name' is only a guess. Click a column to sort.")).pack(fill="x", padx=10,
                                                                                                     pady=(10, 4))
         langs = {}
         for s in streams:
@@ -869,11 +870,15 @@ class App:
 
         def link():
             s = rows.get((tv.selection() or [None])[0])
-            a = by_tag.get(pvar.get().strip())
+            typed = pvar.get().strip()
+            a = by_tag.get(typed) or next((x for t, x in by_tag.items() if t.casefold() == typed.casefold()), None)
             if not s:
                 return self.set_status("Select a stream first.", error=True)
+            if not typed:
+                return self.set_status("Pick a player, or type any Xbox gamertag (e.g. copied from SOTREP).",
+                                       error=True)
             if not a:
-                return self.set_status("Pick one of your players to link this stream to.", error=True)
+                return lookup_and_link(s, typed)
             try:
                 self.db.link_twitch(a["id"], s["id"], s["login"], s["name"])
             except ValueError as e:
@@ -888,6 +893,55 @@ class App:
         def open_stream():
             for i in tv.selection():
                 webbrowser.open(f"https://www.twitch.tv/{rows[i]['login']}")
+
+        def lookup_and_link(s, typed):
+            """A gamertag that is not in the history: ask Xbox (OpenXBL search) for that exact account first."""
+            key = self.xkey.get()
+            if not key:
+                return self.set_status("Add an OpenXBL account to look up gamertags that are not in your list.",
+                                       error=True)
+            if "xboxlookup" in self.busy:
+                return
+            self._set_busy("xboxlookup", True)
+            self.set_status(f"Looking up '{typed}' on Xbox...")
+
+            def done(player, near, err):
+                self._set_busy("xboxlookup", False)
+                if err:
+                    return self.set_status(f"Xbox lookup failed: {err}", error=True)
+                if player is None:
+                    return self.set_status(f"No Xbox account named exactly '{typed}'."
+                                           + (f" Similar: {', '.join(near)}" if near else ""), error=True)
+                aid = self.db.ensure_account(player.gamertag, player.xuid)
+                acc = {"id": aid, "gamertag": player.gamertag}
+                by_tag[player.gamertag] = acc
+                tag_of[aid] = player.gamertag
+                if win.winfo_exists():
+                    pvar.set(player.gamertag)
+                try:
+                    self.db.link_twitch(aid, s["id"], s["login"], s["name"])
+                except ValueError as e:
+                    return self.set_status(str(e), error=True)
+                linked[s["id"]] = aid
+                self.set_status(f"Added {player.gamertag} (Xbox ID {player.xuid}) and linked Twitch channel {s['name']}.")
+                if win.winfo_exists():
+                    fill()
+                    tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])
+                self.reload()
+                self.twitch_check_now(manual=True)
+
+            def work():
+                try:
+                    player, near = find_gamertag(key, typed)
+                    self.q.put(("call", lambda: done(player, near, None)))
+                except ProviderError as e:
+                    self.q.put(("call", lambda e=e: done(None, [], str(e))))
+                except Exception as e:
+                    self.q.put(("call", lambda e=e: done(None, [], f"Unexpected error: {e}")))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        win.lookup_and_link = lookup_and_link
 
         def find_on_sotrep():
             for i in tv.selection():
@@ -1227,6 +1281,8 @@ class App:
                     self._on_twitch_guess(*val)
                 elif kind == "sot_streams":
                     self._on_sot_streams(*val)
+                elif kind == "call":
+                    val()
                 elif kind == "twitch_setup":
                     self._on_twitch_setup(*val)
                 elif kind == "acct_added":

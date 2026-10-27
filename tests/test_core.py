@@ -192,6 +192,28 @@ def test_sotrep_links():
 
 
 # ---- providers
+def test_find_gamertag_exact_only(tmp_path):
+    from brpw.providers import OPENXBL_SEARCH_URL, find_gamertag
+    seen = []
+
+    def http(url, data, headers):
+        seen.append((url, headers["X-Authorization"]))
+        return {"content": {"people": [{"xuid": "1", "gamertag": "Salty Pirate2"},
+                                       {"xuid": "2", "gamertag": "Salty  Pirate", "modernGamertag": "Salty Pirate"}]}}
+    p, near = find_gamertag(" key ", "salty pirate", http)
+    assert p == Player("Salty  Pirate", "2") and near == []
+    assert seen[0] == (OPENXBL_SEARCH_URL + "salty%20pirate", "key")
+    p, near = find_gamertag("key", "Salty Pirat", http)
+    assert p is None and near == ["Salty Pirate2", "Salty  Pirate"]              # never picks a near match
+    assert find_gamertag("key", "  ", http) == (None, [])
+    d = Database(tmp_path / "e.db")
+    d.merge_players([Player("Imported Name")], "import", False)
+    aid = d.ensure_account("Imported Name", "77")                               # imported name gets its XUID
+    assert d.ensure_account("Imported Name", "77") == aid and d.count_accounts() == 1
+    assert d.ensure_account("New One", "78") != aid and d.count_accounts() == 2
+    d.close()
+
+
 def test_parse_import_formats():
     assert [p.gamertag for p in parse_import("gamertag,xuid\nAlice,123\nBob")] == ["Alice", "Bob"]
     assert parse_import("Alice,123")[0].xuid == "123"
@@ -489,6 +511,27 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
                                  if sw.streams_tv.item(i, "values")[1] == "Unlinkedpirate"])
     sw.find_on_sotrep()
     assert opened == ["https://www.sotrep.com/search/twitch-unlinkedpirate"]
+    # a gamertag that is not in the history: looked up on Xbox first, added (without an encounter) and linked
+    monkeypatch.setattr(ui, "find_gamertag", lambda key, tag: (Player("Far Away Pirate", "2535400000000001"), [])
+                        if tag.casefold() == "far away pirate" else (None, ["Far Away Pirat3"]))
+    stranger = [i for i in sw.streams_tv.get_children() if sw.streams_tv.item(i, "values")[1] == "Stranger"]
+    sw.streams_tv.selection_set(stranger)
+    sw.player_var.set("far away pirat")
+    sw.link()
+    end = _t.time() + 5
+    while "xboxlookup" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.05)
+    assert app.status_error and "Similar: Far Away Pirat3" in app.status.get()
+    sw.player_var.set("far away pirate")
+    sw.link()
+    end = _t.time() + 5
+    while "xboxlookup" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.05)
+    far = [r for r in d.list_accounts() if r["xuid"] == "2535400000000001"][0]
+    assert far["gamertag"] == "Far Away Pirate" and far["twitch_id"] == "902" and far["encounters"] == 0
+    assert sw.player_var.get() == "Far Away Pirate"
     sw.destroy()
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker

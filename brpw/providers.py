@@ -6,7 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from .db import Player
 
@@ -225,6 +225,28 @@ def lookup_gamertag(key: str, http=openxbl_json) -> Optional[str]:
         if getattr(e, "code", 0) == 401:
             raise ProviderError("OpenXBL rejected that key.")
         raise
+
+
+OPENXBL_SEARCH_URL = "https://api.xbl.io/v2/search/"
+
+
+def find_gamertag(key: str, gamertag: str, http=openxbl_json) -> Tuple[Optional[Player], List[str]]:
+    """Exact Xbox account for a gamertag via OpenXBL search: (player with XUID, []) on an exact match, otherwise
+    (None, similar gamertags). Never picks a near match by itself."""
+    want = " ".join(gamertag.casefold().split())
+    if not want:
+        return None, []
+    payload = http(OPENXBL_SEARCH_URL + urllib.parse.quote(gamertag.strip()), None, {"X-Authorization": key.strip()})
+    people = ((payload or {}).get("content") or payload or {}).get("people") or []
+    near = []
+    for p in people:
+        if not isinstance(p, dict) or not p.get("xuid"):
+            continue
+        names = [p.get(f) for f in ("gamertag", "modernGamertag", "uniqueModernGamertag") if p.get(f)]
+        if any(" ".join(str(n).casefold().split()) == want for n in names):
+            return Player(str(p.get("gamertag") or names[0]), str(p["xuid"])), []
+        near.extend(str(n) for n in names[:1])
+    return None, near[:5]
 
 
 class OpenXblKey:

@@ -383,6 +383,22 @@ class Database:
                 "SELECT observed_at, source FROM encounters WHERE account_id=? ORDER BY observed_at DESC",
                 (account_id,)).fetchall()
 
+    def ensure_account(self, gamertag: str, xuid: str, source: str = "lookup") -> int:
+        """The account with this XUID, added if new (no encounter: the user looked them up, not met them)."""
+        with self.lock, self.conn:
+            row = self.conn.execute("SELECT id FROM accounts WHERE xuid=?", (xuid,)).fetchone()
+            if row:
+                return row[0]
+            row = self.conn.execute("SELECT id FROM accounts WHERE xuid IS NULL AND gamertag_key=?",
+                                    (_key(gamertag),)).fetchone()
+            if row:                                      # an imported name without XUID: it now has an exact one
+                self.conn.execute("UPDATE accounts SET xuid=? WHERE id=?", (xuid, row[0]))
+                return row[0]
+            now = int(time.time())
+            return self.conn.execute(
+                "INSERT INTO accounts(xuid,gamertag,gamertag_key,first_seen,last_seen,source) VALUES(?,?,?,?,?,?)",
+                (xuid, gamertag, _key(gamertag), now, now, source)).lastrowid
+
     # ---- Twitch (saved by the user, verified against Twitch, matched by exact Twitch ID) ----
     def link_twitch(self, account_id: int, twitch_id: str, login: str, display_name: str) -> None:
         if self.twitch_never([account_id]):
