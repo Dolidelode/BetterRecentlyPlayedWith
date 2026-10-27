@@ -191,7 +191,8 @@ class TwitchClient:
                     out.append({"id": str(s["user_id"]), "login": str(s.get("user_login") or ""),
                                 "name": str(s.get("user_name") or s.get("user_login") or ""),
                                 "title": str(s.get("title") or ""), "viewers": int(s.get("viewer_count") or 0),
-                                "started": _iso_to_epoch(s.get("started_at")), "language": str(s.get("language") or "")})
+                                "started": _iso_to_epoch(s.get("started_at")), "language": str(s.get("language") or ""),
+                                "tags": [str(t) for t in s.get("tags") or []]})
             after = (r.get("pagination") or {}).get("cursor")
             if not after or not r.get("data"):
                 break

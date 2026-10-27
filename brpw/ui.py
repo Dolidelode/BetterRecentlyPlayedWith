@@ -760,20 +760,47 @@ class App:
 
         ttk.Label(win, style="Hint.TLabel", wraplength=860, justify="left", text=(
             "Everyone streaming Sea of Thieves on Twitch now. Just met a streamer? Find them here (filter by name or "
-            "title), pick the player below and press 'Link'. 'same name' is only a guess.")).pack(fill="x", padx=10,
+            "title), pick the player below and press 'Link'. 'same name' is only a guess. Click a column to sort.")).pack(fill="x", padx=10,
                                                                                                     pady=(10, 4))
+        langs = {}
+        for s in streams:
+            langs[s["language"] or "?"] = langs.get(s["language"] or "?", 0) + 1
+        lang_label = {"All languages": None, **{f"{l} ({n})": l for l, n in
+                                                sorted(langs.items(), key=lambda kv: (-kv[1], kv[0]))}}
         top = ttk.Frame(win)
         top.pack(fill="x", padx=10)
-        ttk.Label(top, text="Filter:").pack(side="left")
+        ttk.Label(top, text="Search:").pack(side="left")
         fvar = tk.StringVar()
-        ttk.Entry(top, textvariable=fvar, width=30).pack(side="left", padx=6)
+        ttk.Entry(top, textvariable=fvar, width=24).pack(side="left", padx=(4, 10))
+        lvar = tk.StringVar(value="All languages")
+        ttk.Combobox(top, textvariable=lvar, values=list(lang_label), state="readonly", width=16).pack(side="left")
+        ttk.Label(top, text="Viewers").pack(side="left", padx=(10, 4))
+        vmin, vmax = tk.StringVar(), tk.StringVar()
+        ttk.Entry(top, textvariable=vmin, width=6).pack(side="left")
+        ttk.Label(top, text="to").pack(side="left", padx=3)
+        ttk.Entry(top, textvariable=vmax, width=6).pack(side="left")
+        mine = tk.BooleanVar()
+        ttk.Checkbutton(top, text="Only my players", variable=mine).pack(side="left", padx=(10, 0))
+        shown = tk.StringVar()
+        ttk.Label(top, textvariable=shown, style="Hint.TLabel").pack(side="right")
         box = ttk.Frame(win)
         box.pack(fill="both", expand=True, padx=10, pady=4)
-        cols = (("match", "Your player", 170), ("channel", "Channel", 150), ("viewers", "Viewers", 60),
-                ("uptime", "Live for", 70), ("lang", "Lang", 45), ("title", "Title", 380))
+        cols = (("match", "Your player", 160), ("channel", "Channel", 140), ("viewers", "Viewers", 60),
+                ("uptime", "Live for", 65), ("lang", "Lang", 45), ("title", "Title", 330), ("tags", "Tags", 180))
         tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=16)
+        sort = {"col": None, "desc": False}
+        keys = {"match": lambda s: (not match(s), match(s).casefold()), "channel": lambda s: s["name"].casefold(),
+                "viewers": lambda s: s["viewers"], "uptime": lambda s: -(s["started"] or 0),
+                "lang": lambda s: s["language"], "title": lambda s: s["title"].casefold(),
+                "tags": lambda s: ", ".join(s.get("tags") or []).casefold()}
+
+        def sort_by(c):
+            sort["desc"] = not sort["desc"] if sort["col"] == c else c == "viewers"
+            sort["col"] = c
+            fill()
+            remember()
         for c, t, w in cols:
-            tv.heading(c, text=t)
+            tv.heading(c, text=t, command=lambda c=c: sort_by(c))
             tv.column(c, width=w, anchor="e" if c == "viewers" else "w")
         tv.tag_configure("match", background=self.pal["friend"])
         sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
@@ -783,19 +810,47 @@ class App:
         rows = {}
         now = time.time()
 
+        def num(var):
+            try:
+                return int(var.get().strip())
+            except ValueError:
+                return None
+
         def fill(*_):
             tv.delete(*tv.get_children())
             rows.clear()
             f = fvar.get().strip().casefold()
-            for s in sorted(streams, key=lambda s: (not match(s), -s["viewers"])):
-                m = match(s)
-                if f and f not in s["name"].casefold() and f not in s["title"].casefold() and f not in m.casefold():
+            lang, lo, hi = lang_label.get(lvar.get()), num(vmin), num(vmax)
+            if sort["col"]:
+                order = sorted(streams, key=keys[sort["col"]], reverse=sort["desc"])
+            else:
+                order = sorted(streams, key=lambda s: (not match(s), -s["viewers"]))
+            for s in order:
+                m, tags = match(s), ", ".join(s.get("tags") or [])
+                if f and not any(f in x.casefold() for x in (s["name"], s["title"], m, tags)):
+                    continue
+                if (lang and (s["language"] or "?") != lang) or (lo is not None and s["viewers"] < lo) \
+                        or (hi is not None and s["viewers"] > hi) or (mine.get() and not m):
                     continue
                 iid = tv.insert("", "end", tags=("match",) if m else (), values=(
-                    m, s["name"], s["viewers"], self._uptime(s["started"], now), s["language"], s["title"]))
+                    m, s["name"], s["viewers"], self._uptime(s["started"], now), s["language"], s["title"], tags))
                 rows[iid] = s
+            shown.set(f"showing {len(rows)} of {len(streams)}")
 
-        fvar.trace_add("write", fill)
+        keep = getattr(self, "sot_filters", {})                       # Refresh keeps the filters
+        fvar.set(keep.get("search", ""))
+        lvar.set(next((k for k, v in lang_label.items() if v == keep.get("lang")), "All languages"))
+        vmin.set(keep.get("vmin", ""))
+        vmax.set(keep.get("vmax", ""))
+        mine.set(keep.get("mine", False))
+        sort.update(keep.get("sort", {}))
+
+        def remember(*_):
+            self.sot_filters = {"search": fvar.get(), "lang": lang_label.get(lvar.get()), "vmin": vmin.get(),
+                                "vmax": vmax.get(), "mine": mine.get(), "sort": dict(sort)}
+        for v in (fvar, lvar, vmin, vmax, mine):
+            v.trace_add("write", fill)
+            v.trace_add("write", remember)
         fill()
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(4, 10))
@@ -839,7 +894,8 @@ class App:
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
         win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
-        self._place_dialog(win, 900, 520)
+        win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
+        self._place_dialog(win, 1040, 540)
 
     def never_link_selected(self):
         """Toggle 'never link a Twitch channel' (cheaters, ...) for the selected players."""

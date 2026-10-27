@@ -434,18 +434,49 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.never_link_selected()                                         # pressing it again removes the mark
     assert app.tree.set(str(by["New2"]), "twitch") == ""
     # "Live SoT streams": linked and same-name streams first, linking uses the exact Twitch ID of the stream
-    st = lambda i, login, v: {"id": i, "login": login, "name": login.title(), "title": "Sailing", "viewers": v,
-                              "started": _t.time() - 3700, "language": "en"}
+    st = lambda i, login, v, lang="en", tags=(): {
+        "id": i, "login": login, "name": login.title(), "title": "Sailing", "viewers": v, "started": _t.time() - 3700,
+        "language": lang, "tags": list(tags)}
     app.tree.selection_set(())
-    app._on_sot_streams([st("900", "big_one", 500), st("100200300", "example_streamer", 7),
-                         st("901", "unlinkedpirate", 3), st("902", "stranger", 1)], None)
+    streams = [st("900", "big_one", 500, "de", ("Hourglass",)), st("100200300", "example_streamer", 7),
+               st("901", "unlinkedpirate", 3), st("902", "stranger", 1, "nl")]
+    app._on_sot_streams(streams, None)
     sw = app.sot_win
+    count = lambda: len(sw.streams_tv.get_children())
     vals = [sw.streams_tv.item(i, "values") for i in sw.streams_tv.get_children()]
     assert vals[0][0] == "linked: Old" and vals[1][0] == "same name: Unlinked Pirate" and vals[2][1] == "Big_One"
-    assert vals[0][3] == "1h 01m"
+    assert vals[0][3] == "1h 01m" and vals[2][6] == "Hourglass"
     sw.filter_var.set("strang")
-    assert len(sw.streams_tv.get_children()) == 1
+    assert count() == 1
+    sw.filter_var.set("hourglass")                                     # search also looks at tags
+    assert count() == 1
     sw.filter_var.set("")
+    sw.lang_var.set("nl (1)")
+    assert count() == 1
+    sw.lang_var.set("All languages")
+    sw.vmin.set("5")
+    sw.vmax.set("abc")                                                 # not a number: ignored
+    assert count() == 2
+    sw.vmax.set("100")
+    assert count() == 1
+    sw.vmin.set("")
+    sw.vmax.set("")
+    sw.mine.set(True)
+    assert count() == 2
+    sw.mine.set(False)
+    sw.lang_var.set("en (2)")
+    assert count() == 2
+    sw.sort_by("viewers")                                              # first click on viewers: most first
+    assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Example_Streamer"
+    sw.sort_by("viewers")
+    assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Unlinkedpirate"
+    app._on_sot_streams(streams, None)                                 # Refresh keeps the filters and sorting
+    sw = app.sot_win
+    assert sw.lang_var.get() == "en (2)" and count() == 2
+    assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Unlinkedpirate"
+    app.sot_filters = {}
+    app._on_sot_streams(streams, None)
+    sw = app.sot_win
     sw.streams_tv.selection_set(sw.streams_tv.get_children()[1])
     root.update()
     assert sw.player_var.get() == "Unlinked Pirate"                    # same-name stream pre-fills the player
