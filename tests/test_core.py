@@ -533,6 +533,16 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert far["gamertag"] == "Far Away Pirate" and far["twitch_id"] == "902" and far["encounters"] == 0
     assert sw.player_var.get() == "Far Away Pirate"
     sw.destroy()
+    # auto matches: the window explains each pair, auto links are labelled in the list
+    d.add_match_evidence(by["New2"], "555", "newtwo", "NewTwo", 1, 1, 10)
+    d.unlink_twitch([by["Old"]])
+    d.link_twitch(by["Old"], "100200300", "example_streamer", "Example_Streamer", source="auto")
+    app.reload()
+    assert app.tree.set(str(by["Old"]), "twitch").endswith("(auto)")
+    mw = app.auto_matches_dialog()
+    states = [mw.matches_tv.item(i, "values")[4] for i in mw.matches_tv.get_children()]
+    assert states == ["collecting proof: 1 of 3"]
+    mw.destroy()
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()

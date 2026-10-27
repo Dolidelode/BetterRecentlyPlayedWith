@@ -11,6 +11,7 @@ from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         find_gamertag, lookup_gamertag)
+from .automatch import HITS_NEEDED, AutoMatcher
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
@@ -87,6 +88,7 @@ class App:
         self.tcreds = TwitchCreds(data_dir() / "twitch.json")
         self.tclient = TwitchClient(self.tcreds)
         self.tcheck = TwitchChecker(db, self.tclient)
+        self.matcher = AutoMatcher(db, self.tclient)
         self.twitch_after_id = None
         self.twitch_busy = False
         self._build()
@@ -319,7 +321,7 @@ class App:
             elif a["twitch_never"] is not None:
                 tw_text = "never link" + (f" ({a['twitch_never']})" if a["twitch_never"] else "")
             else:
-                tw_text = a["twitch_name"] or ""
+                tw_text = (a["twitch_name"] or "") + (" (auto)" if a["twitch_source"] == "auto" else "")
             iid = self.tree.insert(
                 "", "end", iid=str(a["id"]), image=self.twitch_img if (a["id"] in live_ids or tw_live) else "",
                 tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()), values=(
@@ -567,7 +569,8 @@ class App:
         cur = self.db.twitch_links([aid])
         name = self._ask_tag(
             "Link Twitch", f"Twitch channel for {gamertag}\n(name, @name or twitch.tv link; empty removes the link)"
-            + (f"\nCurrently: {cur[0]['display_name']}" if cur else ""), [], True)
+            + (f"\nCurrently: {cur[0]['display_name']}" + (" (found automatically)" if cur[0]["source"] == "auto"
+                                                            else "") if cur else ""), [], True)
         if name is None:
             return
         if name == "":
@@ -953,10 +956,72 @@ class App:
         ttk.Button(bar, text="Find on SOTREP", command=find_on_sotrep).pack(side="left", padx=4)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
+        ttk.Button(bar, text="Auto matches...", command=self.auto_matches_dialog).pack(side="right", padx=4)
         win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
         win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
         win.find_on_sotrep = find_on_sotrep
         self._place_dialog(win, 1040, 540)
+
+    @staticmethod
+    def _match_state(m) -> str:
+        if m["auto_linked"]:
+            return "linked automatically"
+        if m["rejected"]:
+            return "ruled out: you removed this link"
+        if m["misses"]:
+            return f"ruled out: streamed while the player was not in the game ({m['misses']}x)"
+        if m["never"]:
+            return "player marked 'never link'"
+        if m["linked"]:
+            return "player already has a Twitch channel"
+        if m["channel_taken"]:
+            return "channel is linked to another player"
+        return f"collecting proof: {m['hits']} of {HITS_NEEDED}"
+
+    def auto_matches_dialog(self):
+        """What the auto-matcher has seen: similar-name pairs and the streams that proved or ruled them out."""
+        rows = self.db.match_summary()
+        win = tk.Toplevel(self.root)
+        win.title("Auto matches")
+        win.configure(bg=self.pal["bg"])
+        ttk.Label(win, style="Hint.TLabel", wraplength=760, justify="left", text=(
+            "The app watches players with a similar Twitch name. A pair is linked only after the player was in Sea of "
+            f"Thieves during {HITS_NEEDED} different streams of that channel, and never when the channel streamed "
+            "while the player was offline or in another game. Same name alone proves nothing. Uses your 20 most "
+            "recent players (the ones whose Xbox status the app checks).")).pack(fill="x", padx=10, pady=(10, 4))
+        box = ttk.Frame(win)
+        box.pack(fill="both", expand=True, padx=10, pady=4)
+        tv = ttk.Treeview(box, columns=("player", "channel", "hits", "misses", "state"), show="headings", height=12)
+        for c, t, w in (("player", "Player", 170), ("channel", "Twitch channel", 160), ("hits", "In game", 65),
+                        ("misses", "Not in game", 80), ("state", "State", 300)):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="w")
+        tv.tag_configure("linked", background=self.pal["friend"])
+        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        by_iid = {}
+        for m in rows:
+            iid = tv.insert("", "end", tags=("linked",) if m["auto_linked"] else (), values=(
+                m["gamertag"], m["display_name"], m["hits"], m["misses"] - m["rejected"], self._match_state(m)))
+            by_iid[iid] = m
+        if not rows:
+            tv.insert("", "end", values=("", "", "", "", "nothing seen yet: needs Twitch setup + live checks"))
+
+        def open_channel():
+            for i in tv.selection():
+                if i in by_iid:
+                    webbrowser.open(f"https://www.twitch.tv/{by_iid[i]['login']}")
+
+        tv.bind("<Double-1>", lambda e: open_channel())
+        bar = ttk.Frame(win)
+        bar.pack(pady=(4, 10))
+        ttk.Button(bar, text="Open channel", command=open_channel).pack(side="left", padx=4)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="left", padx=4)
+        win.matches_tv = tv                                          # kept for tests
+        self._place_dialog(win, 820, 420)
+        return win
 
     def never_link_selected(self):
         """Toggle 'never link a Twitch channel' (cheaters, ...) for the selected players."""
@@ -984,27 +1049,36 @@ class App:
             webbrowser.open(f"https://www.twitch.tv/{l['login']}")
 
     def twitch_check_now(self, manual=False):
-        if self.twitch_busy or not self.tcreds.configured() or not self.db.twitch_links():
+        """Auto-matcher round (only when there is fresh Xbox presence to compare), then live status of the links."""
+        if self.twitch_busy or not self.tcreds.configured():
+            return
+        if not self.db.twitch_links() and not self.matcher.players():
             return
         self.twitch_busy = True
         self._set_busy("twitch", True)
 
         def work():
+            made = []
             try:
-                self.q.put(("twitch", (self.tcheck.check_accounts(), None, manual)))
+                made = self.matcher.run()
+                result = self.tcheck.check_accounts() if self.db.twitch_links() else {}
+                self.q.put(("twitch", (result, None, manual, made)))
             except ProviderError as e:
-                self.q.put(("twitch", ({}, str(e), manual)))
+                self.q.put(("twitch", ({}, str(e), manual, made)))
             except Exception as e:
-                self.q.put(("twitch", ({}, f"Unexpected error: {e}", manual)))
+                self.q.put(("twitch", ({}, f"Unexpected error: {e}", manual, made)))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_twitch(self, result, err, manual):
+    def _on_twitch(self, result, err, manual, made=()):
         self.twitch_busy = False
         self._set_busy("twitch", False)
+        if made:
+            self.set_status("Found automatically: " + ", ".join(
+                f"{m['gamertag']} = Twitch {m['name']} (in the game during {m['hits']} of their streams)" for m in made))
         if err:
-            return self.set_status(f"Twitch check failed: {err}", error=True)
-        if manual:
+            self.set_status(f"Twitch check failed: {err}", error=True)
+        elif manual and not made:
             live_n = sum(1 for v in result.values() if v["live"])
             self.set_status(f"Twitch: {live_n} of {len(result)} linked player(s) live.")
         self.reload()

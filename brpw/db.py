@@ -126,7 +126,17 @@ def _m9(c: sqlite3.Connection) -> None:
         reason TEXT NOT NULL DEFAULT '', set_at INTEGER NOT NULL)""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9]  # index i migrates user_version i -> i+1
+def _m10(c: sqlite3.Connection) -> None:
+    # Auto-matcher: where a Twitch link came from, and per Twitch stream whether the player was in the game.
+    c.execute("ALTER TABLE twitch_links ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+    c.execute("""CREATE TABLE twitch_evidence(
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        twitch_id TEXT NOT NULL, login TEXT NOT NULL, display_name TEXT NOT NULL,
+        session INTEGER NOT NULL, result INTEGER NOT NULL, at INTEGER NOT NULL,
+        PRIMARY KEY(account_id, twitch_id, session))""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -322,7 +332,7 @@ class Database:
                       f.relation AS relation,
                       tl.twitch_id AS twitch_id, tl.login AS twitch_login, tl.display_name AS twitch_name,
                       ts.live AS twitch_live, ts.viewers AS twitch_viewers, ts.game AS twitch_game,
-                      ts.title AS twitch_title, ts.checked_at AS twitch_checked,
+                      ts.title AS twitch_title, ts.checked_at AS twitch_checked, tl.source AS twitch_source,
                       tn.reason AS twitch_never
                FROM accounts a
                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?
@@ -400,17 +410,24 @@ class Database:
                 (xuid, gamertag, _key(gamertag), now, now, source)).lastrowid
 
     # ---- Twitch (saved by the user, verified against Twitch, matched by exact Twitch ID) ----
-    def link_twitch(self, account_id: int, twitch_id: str, login: str, display_name: str) -> None:
+    def link_twitch(self, account_id: int, twitch_id: str, login: str, display_name: str,
+                    source: str = "manual") -> None:
         if self.twitch_never([account_id]):
             raise ValueError("This player is marked 'never link'. Remove that mark first.")
         with self.lock, self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO twitch_links(account_id,twitch_id,login,display_name,linked_at) VALUES(?,?,?,?,?)",
-                (account_id, twitch_id, login, display_name, int(time.time())))
+                "INSERT OR REPLACE INTO twitch_links(account_id,twitch_id,login,display_name,linked_at,source) "
+                "VALUES(?,?,?,?,?,?)", (account_id, twitch_id, login, display_name, int(time.time()), source))
             self.conn.execute("DELETE FROM twitch_status WHERE account_id=?", (account_id,))   # old status is stale now
 
     def unlink_twitch(self, account_ids: List[int]) -> None:
+        """Remove links. Removing an AUTO link also tells the auto-matcher never to suggest that pair again."""
         with self.lock, self.conn:
+            for a in account_ids:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO twitch_evidence(account_id,twitch_id,login,display_name,session,result,at) "
+                    "SELECT account_id,twitch_id,login,display_name,-1,0,? FROM twitch_links "
+                    "WHERE account_id=? AND source='auto'", (int(time.time()), a))
             self.conn.executemany("DELETE FROM twitch_links WHERE account_id=?", [(a,) for a in account_ids])
             self.conn.executemany("DELETE FROM twitch_status WHERE account_id=?", [(a,) for a in account_ids])
 
@@ -442,6 +459,34 @@ class Database:
         with self.lock:
             return {r[0]: r[1] for r in self.conn.execute(
                 f"SELECT account_id, reason FROM twitch_never WHERE account_id IN ({marks})", list(account_ids))}
+
+    # ---- auto-matcher evidence (see automatch.py) ----
+    def add_match_evidence(self, account_id: int, twitch_id: str, login: str, display_name: str,
+                           session: int, result: int, at: int) -> None:
+        """One observation for one Twitch stream; seen in the game once during a stream makes it a hit."""
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO twitch_evidence(account_id,twitch_id,login,display_name,session,result,at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_id,twitch_id,session) DO UPDATE SET "
+                "result=MAX(result, excluded.result), at=excluded.at, login=excluded.login, "
+                "display_name=excluded.display_name", (account_id, twitch_id, login, display_name, session, result, at))
+
+    def match_summary(self) -> List[sqlite3.Row]:
+        """Per (player, channel): streams online together (hits), streams that contradict it (misses), and state."""
+        with self.lock:
+            return self.conn.execute("""
+                SELECT e.account_id, a.gamertag, e.twitch_id, MAX(e.login) AS login, MAX(e.display_name) AS display_name,
+                       SUM(e.result = 1 AND e.session >= 0) AS hits, SUM(e.result = 0) AS misses,
+                       SUM(e.session = -1) AS rejected, MAX(e.at) AS last_at,
+                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=e.account_id) AS linked,
+                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=e.account_id
+                              AND l.twitch_id=e.twitch_id AND l.source='auto') AS auto_linked,
+                       EXISTS(SELECT 1 FROM twitch_never n WHERE n.account_id=e.account_id) AS never,
+                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.twitch_id=e.twitch_id
+                              AND l.account_id<>e.account_id) AS channel_taken
+                FROM twitch_evidence e JOIN accounts a ON a.id=e.account_id
+                GROUP BY e.account_id, e.twitch_id
+                ORDER BY hits DESC, last_at DESC""").fetchall()
 
     def store_twitch_status(self, rows) -> None:
         with self.lock, self.conn:
