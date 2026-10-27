@@ -48,6 +48,18 @@ def parse_channel_input(text: str) -> str:
     raise ValueError("That doesn't look like a Twitch name or channel link.")
 
 
+def login_candidates(gamertag: str) -> List[str]:
+    """Twitch logins that a gamertag could plausibly be: lower-case, spaces removed or turned into underscores,
+    other characters dropped. Only valid Twitch logins (4-25 of a-z, 0-9, _) are returned. These are GUESSES."""
+    g = (gamertag or "").strip().lower()
+    out = []
+    for v in (re.sub(r"\s+", "", g), re.sub(r"\s+", "_", g)):
+        v = re.sub(r"[^a-z0-9_]", "", v)
+        if re.fullmatch(r"[a-z0-9_]{4,25}", v) and v not in out:
+            out.append(v)
+    return out
+
+
 class TwitchCreds:
     """Client ID + secret kept in a JSON file in the app-data folder (never in the database or the repo)."""
 
@@ -127,6 +139,35 @@ class TwitchClient:
             raise ProviderError(f"Twitch has no channel named '{name}'.")
         u = data[0]
         return TwitchUser(str(u["id"]), str(u["login"]), str(u.get("display_name") or u["login"]))
+
+    def users_by_login(self, logins: List[str]) -> Dict[str, TwitchUser]:
+        """login -> user for the logins that exist (100 per request)."""
+        out: Dict[str, TwitchUser] = {}
+        names = sorted(set(l.lower() for l in logins))
+        for i in range(0, len(names), CHUNK):
+            for u in self._get("users", [("login", n) for n in names[i:i + CHUNK]]).get("data") or []:
+                out[str(u["login"]).lower()] = TwitchUser(str(u["id"]), str(u["login"]),
+                                                          str(u.get("display_name") or u["login"]))
+        return out
+
+    def suggest(self, players: List[Tuple[int, str]]) -> List[dict]:
+        """Possible Twitch channels for (account_id, gamertag) pairs, found only by NAME. Not confirmed identities:
+        the caller must present them as guesses. Live status comes from Twitch itself."""
+        cands = {aid: login_candidates(gt) for aid, gt in players}
+        found = self.users_by_login([c for cs in cands.values() for c in cs])
+        live = self.streams([u.id for u in found.values()]) if found else {}
+        out = []
+        for aid, gt in players:
+            for c in cands[aid]:
+                u = found.get(c)
+                if u is None or any(o["account_id"] == aid and o["id"] == u.id for o in out):
+                    continue
+                s = live.get(u.id)
+                out.append({"account_id": aid, "gamertag": gt, "id": u.id, "login": u.login, "name": u.display_name,
+                            "live": bool(s), "game": s and s["game"], "title": s and s["title"],
+                            "viewers": s and s["viewers"],
+                            "sot": bool(s) and "sea of thieves" in (s["game"] or "").casefold()})
+        return out
 
     def streams(self, user_ids: List[str]) -> Dict[str, dict]:
         """user_id -> stream details, for those that are live right now (100 IDs per request)."""

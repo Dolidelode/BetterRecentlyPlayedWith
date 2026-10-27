@@ -404,6 +404,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
     assert icons["New"]                                              # the icon appeared for the confirmed player
     dlg.destroy()
+    # "Guess Twitch": suggestions are only linked after the user confirms them
+    app._on_twitch_guess([{"account_id": by["New2"], "gamertag": "New2", "id": "321", "login": "new2", "name": "New2",
+                           "live": True, "game": "Sea of Thieves", "title": "t", "viewers": 4, "sot": True}], None)
+    guess = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "55"               # nothing changed before confirming
+    guess.guess_tv.selection_set(guess.guess_tv.get_children()[0])
+    guess.link_selected()
+    assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "321" and not guess.winfo_exists()
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()

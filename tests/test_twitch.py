@@ -55,10 +55,10 @@ def fake(users=None, live=None, calls=None, token_error=None, stream_errors=None
         q = urllib.parse.parse_qs(u.query)
         if u.path.endswith("/users"):
             if "login" in q:
-                hit = users.get(q["login"][0].lower())
+                hits = [(users[l.lower()], l.lower()) for l in q["login"] if l.lower() in users]
             else:
-                hit = next(((i, d) for (i, d) in users.values() if i == q["id"][0]), None)
-            return {"data": [{"id": hit[0], "login": hit[1].lower(), "display_name": hit[1]}] if hit else []}
+                hits = [((i, d), d.lower()) for (i, d) in users.values() if i == q["id"][0]]
+            return {"data": [{"id": h[0][0], "login": h[1], "display_name": h[0][1]} for h in hits]}
         if u.path.endswith("/streams"):
             if stream_errors:
                 raise stream_errors.pop(0)
@@ -232,3 +232,24 @@ def test_stale_status_is_not_trusted():
     row = lambda live, at: {"twitch_live": live, "twitch_checked": at}
     assert twitch_live(row(1, now - 5), now) and not twitch_live(row(1, now - STATUS_MAX_AGE - 1), now)
     assert not twitch_live(row(0, now), now) and not twitch_live(row(None, None), now)
+
+
+def test_login_candidates():
+    from brpw.twitch import login_candidates
+    assert login_candidates("Salty Pirate") == ["saltypirate", "salty_pirate"]
+    assert login_candidates("Cool_Pirate") == ["cool_pirate"]
+    assert login_candidates("Weird!Name#1234") == ["weirdname1234"]
+    assert login_candidates("ab") == [] and login_candidates("") == []
+
+
+def test_suggest_finds_same_name_channels_and_live_status():
+    users = {"examplestreamer": ("100200300", "ExampleStreamer"), "other_one": ("555", "Other_One")}
+    live = {"100200300": {"title": "t", "game": "Sea of Thieves", "viewers": 12}}
+    calls = []
+    cl = TwitchClient(Mem(), http=fake(users, live, calls), now=Clock())
+    out = cl.suggest([(1, "Example Streamer"), (2, "Other One"), (3, "Nobody Here Zz")])
+    by = {o["account_id"]: o for o in out}
+    assert set(by) == {1, 2}
+    assert by[1]["live"] and by[1]["sot"] and by[1]["viewers"] == 12 and by[1]["login"] == "examplestreamer"
+    assert not by[2]["live"] and by[2]["name"] == "Other_One"
+    assert sum(1 for u in calls if "/users" in u) == 1                        # all candidates in one request

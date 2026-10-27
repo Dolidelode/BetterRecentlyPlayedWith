@@ -248,6 +248,7 @@ class App:
         ttk.Button(bar3, text="Check live", command=self.check_live_selected).pack(side="left")
         ttk.Button(bar3, text="Twitch...", command=self.link_twitch_selected).pack(side="left", padx=4)
         ttk.Button(bar3, text="Open Twitch", command=self.open_twitch_selected).pack(side="left")
+        ttk.Button(bar3, text="Guess Twitch", command=self.guess_twitch).pack(side="left", padx=4)
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
@@ -588,6 +589,80 @@ class App:
         self.reload()
         self.twitch_check_now(manual=True)
 
+    def guess_twitch(self):
+        """Suggest Twitch channels with the same name as the gamertag (selected players, or the 20 most recent)."""
+        if not self.tcreds.configured():
+            return self.set_status("Twitch is not set up. Use 'Twitch setup...' first.", error=True)
+        if "twitchguess" in self.busy:
+            return
+        rows = self.db.list_accounts(owner=self.xkey.active())
+        sel = set(self._selected_ids())
+        pick = [r for r in rows if r["id"] in sel] if sel else             sorted([r for r in rows if r["pos"] is not None and r["pos"] < 20], key=lambda r: r["pos"])
+        players = [(r["id"], r["gamertag"]) for r in pick if not r["twitch_id"]]
+        if not players:
+            return self.set_status("Nothing to guess: those players already have a Twitch channel linked.")
+        self._set_busy("twitchguess", True)
+        self.set_status(f"Looking for Twitch channels named like {len(players)} player(s)...")
+
+        def work():
+            try:
+                self.q.put(("twitch_guess", (self.tclient.suggest(players), None)))
+            except ProviderError as e:
+                self.q.put(("twitch_guess", ([], str(e))))
+            except Exception as e:
+                self.q.put(("twitch_guess", ([], f"Unexpected error: {e}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_twitch_guess(self, sugg, err):
+        self._set_busy("twitchguess", False)
+        if err:
+            return self.set_status(f"Twitch guess failed: {err}", error=True)
+        if not sugg:
+            return self.set_status("No Twitch channels with the same name as those gamertags.")
+        self.set_status(f"Found {len(sugg)} possible Twitch channel(s). Check and confirm the right ones.")
+        win = tk.Toplevel(self.root)
+        win.title("Possible Twitch channels (guesses)")
+        win.configure(bg=self.pal["bg"])
+        ttk.Label(win, style="Hint.TLabel", wraplength=700, justify="left", text=(
+            "These channels only have the SAME NAME as the gamertag. They can be a different person. Open a channel "
+            "to check, then select the right ones and press 'Link selected'. Only linked channels are tracked.")
+        ).pack(fill="x", padx=10, pady=(10, 4))
+        tv = ttk.Treeview(win, columns=("player", "channel", "status"), show="headings", height=min(len(sugg), 12))
+        for c, t, w in (("player", "Player", 180), ("channel", "Possible Twitch channel", 180), ("status", "Twitch now", 340)):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="w")
+        tv.tag_configure("live", background=self.pal["friend"])
+        rows = {}
+        for g in sorted(sugg, key=lambda g: (not g["sot"], not g["live"], g["gamertag"].casefold())):
+            status = (f"LIVE: {g['game'] or 'no game set'} ({g['viewers']} viewers)" if g["live"] else "offline")
+            iid = tv.insert("", "end", values=(g["gamertag"], g["name"], status), tags=("live",) if g["live"] else ())
+            rows[iid] = g
+        tv.pack(fill="both", expand=True, padx=10, pady=4)
+
+        def link_selected():
+            chosen = [rows[i] for i in tv.selection()]
+            for g in chosen:
+                self.db.link_twitch(g["account_id"], g["id"], g["login"], g["name"])
+            if chosen:
+                self.set_status(f"Linked {len(chosen)} Twitch channel(s) you confirmed.")
+                win.destroy()
+                self.reload()
+                self.twitch_check_now(manual=True)
+
+        def open_channel():
+            for i in tv.selection():
+                webbrowser.open(f"https://www.twitch.tv/{rows[i]['login']}")
+
+        tv.bind("<Double-1>", lambda e: open_channel())
+        bar = ttk.Frame(win)
+        bar.pack(pady=(4, 10))
+        ttk.Button(bar, text="Link selected", command=link_selected).pack(side="left", padx=4)
+        ttk.Button(bar, text="Open channel", command=open_channel).pack(side="left", padx=4)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="left", padx=4)
+        win.guess_tv, win.link_selected = tv, link_selected          # kept for tests
+        self._place_dialog(win, 740, 160 + 24 * min(len(sugg), 12))
+
     def open_twitch_selected(self):
         links = self.db.twitch_links(self._selected_ids())
         if not links:
@@ -889,6 +964,8 @@ class App:
                     self._on_twitch(*val)
                 elif kind == "twitch_link":
                     self._on_twitch_link(*val)
+                elif kind == "twitch_guess":
+                    self._on_twitch_guess(*val)
                 elif kind == "twitch_setup":
                     self._on_twitch_setup(*val)
                 elif kind == "acct_added":
