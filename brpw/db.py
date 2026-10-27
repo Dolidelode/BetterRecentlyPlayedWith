@@ -119,7 +119,14 @@ def _m8(c: sqlite3.Connection) -> None:
         checked_at INTEGER NOT NULL, live INTEGER NOT NULL, title TEXT, game TEXT, viewers INTEGER, started_at INTEGER)""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8]  # index i migrates user_version i -> i+1
+def _m9(c: sqlite3.Connection) -> None:
+    # "Never link": players the user never wants a Twitch channel for (cheaters, ...). Guess Twitch skips them.
+    c.execute("""CREATE TABLE twitch_never(
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        reason TEXT NOT NULL DEFAULT '', set_at INTEGER NOT NULL)""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -315,11 +322,13 @@ class Database:
                       f.relation AS relation,
                       tl.twitch_id AS twitch_id, tl.login AS twitch_login, tl.display_name AS twitch_name,
                       ts.live AS twitch_live, ts.viewers AS twitch_viewers, ts.game AS twitch_game,
-                      ts.title AS twitch_title, ts.checked_at AS twitch_checked
+                      ts.title AS twitch_title, ts.checked_at AS twitch_checked,
+                      tn.reason AS twitch_never
                FROM accounts a
                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?
                LEFT JOIN twitch_links tl ON tl.account_id=a.id
-               LEFT JOIN twitch_status ts ON ts.account_id=a.id"""
+               LEFT JOIN twitch_status ts ON ts.account_id=a.id
+               LEFT JOIN twitch_never tn ON tn.account_id=a.id"""
         args: list = [owner, owner, owner]      # in_latest, pos, friends join (textual order)
         if search.strip():
             like = f"%{search.strip().casefold()}%"
@@ -376,6 +385,8 @@ class Database:
 
     # ---- Twitch (saved by the user, verified against Twitch, matched by exact Twitch ID) ----
     def link_twitch(self, account_id: int, twitch_id: str, login: str, display_name: str) -> None:
+        if self.twitch_never([account_id]):
+            raise ValueError("This player is marked 'never link'. Remove that mark first.")
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO twitch_links(account_id,twitch_id,login,display_name,linked_at) VALUES(?,?,?,?,?)",
@@ -395,6 +406,26 @@ class Database:
                 return []
             marks = ",".join("?" * len(account_ids))
             return self.conn.execute(f"SELECT * FROM twitch_links WHERE account_id IN ({marks})", list(account_ids)).fetchall()
+
+    def set_twitch_never(self, account_ids: List[int], reason: str = "") -> None:
+        """Mark players as 'never link a Twitch channel'; any existing link is removed."""
+        self.unlink_twitch(account_ids)
+        with self.lock, self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO twitch_never(account_id,reason,set_at) VALUES(?,?,?)",
+                                  [(a, (reason or "").strip(), int(time.time())) for a in account_ids])
+
+    def clear_twitch_never(self, account_ids: List[int]) -> None:
+        with self.lock, self.conn:
+            self.conn.executemany("DELETE FROM twitch_never WHERE account_id=?", [(a,) for a in account_ids])
+
+    def twitch_never(self, account_ids: List[int]) -> dict:
+        """account_id -> reason, for those marked 'never link'."""
+        if not account_ids:
+            return {}
+        marks = ",".join("?" * len(account_ids))
+        with self.lock:
+            return {r[0]: r[1] for r in self.conn.execute(
+                f"SELECT account_id, reason FROM twitch_never WHERE account_id IN ({marks})", list(account_ids))}
 
     def store_twitch_status(self, rows) -> None:
         with self.lock, self.conn:

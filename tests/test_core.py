@@ -412,6 +412,27 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     guess.guess_tv.selection_set(guess.guess_tv.get_children()[0])
     guess.link_selected()
     assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "321" and not guess.winfo_exists()
+    # "Never link": marked players show it, lose their link, and Guess Twitch (no selection = everyone) skips them
+    app._ask_tag = lambda *a, **k: "cheater"
+    app.tree.selection_set(str(by["New2"]))
+    app.never_link_selected()
+    assert app.tree.set(str(by["New2"]), "twitch") == "never link (cheater)" and not d.twitch_links([by["New2"]])
+    d.merge_players([Player("Unlinked Pirate", "9876543210")], "import", False)
+    asked = []
+    app.tclient.suggest = lambda players: asked.append(players) or []
+    app.tree.selection_set(())
+    app.guess_twitch()
+    end = _t.time() + 5
+    while "twitchguess" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.05)
+    assert asked, app.status.get()
+    guessed = {aid for aid, _ in asked[0]}
+    assert by["New2"] not in guessed and by["Old"] not in guessed and by["New"] not in guessed   # never / linked
+    assert guessed == {r["id"] for r in d.list_accounts() if not r["twitch_id"] and r["twitch_never"] is None}
+    app.tree.selection_set(str(by["New2"]))
+    app.never_link_selected()                                         # pressing it again removes the mark
+    assert app.tree.set(str(by["New2"]), "twitch") == ""
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()

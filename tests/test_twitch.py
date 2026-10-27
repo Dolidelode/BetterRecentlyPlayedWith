@@ -217,6 +217,20 @@ def test_link_unlink_relink_and_cascade(db):
     assert db.twitch_links() == []                                                  # deleted with the account
 
 
+def test_never_link_blocks_linking_and_removes_link(db):
+    ids = seed_links(db)
+    db.set_twitch_never([ids["Live"], ids["NoLink"]], " cheater ")
+    rows = {r["gamertag"]: r for r in db.list_accounts()}
+    assert rows["Live"]["twitch_id"] is None and rows["Live"]["twitch_never"] == "cheater"   # old link removed
+    assert rows["Off"]["twitch_never"] is None and rows["Off"]["twitch_id"] == "777"
+    with pytest.raises(ValueError, match="never link"):
+        db.link_twitch(ids["NoLink"], "1", "a", "A")
+    assert db.twitch_never([ids["Live"], ids["Off"]]) == {ids["Live"]: "cheater"} and db.twitch_never([]) == {}
+    db.clear_twitch_never([ids["NoLink"]])
+    db.link_twitch(ids["NoLink"], "1", "a", "A")
+    assert db.twitch_links([ids["NoLink"]])[0]["twitch_id"] == "1"
+
+
 def test_twitch_tables_added_by_migration(tmp_path):
     from brpw.db import MIGRATIONS
     d = Database(tmp_path / "p.db", migrations=MIGRATIONS[:7])

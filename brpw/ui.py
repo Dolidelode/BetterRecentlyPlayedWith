@@ -159,7 +159,7 @@ class App:
     def _build(self):
         r = self.root
         r.title(f"Better Recently Played With {__version__}")
-        r.geometry("1000x540")
+        r.geometry("1130x540")
         r.minsize(760, 380)
         self._apply_style()
         self._apply_icon()
@@ -249,6 +249,7 @@ class App:
         ttk.Button(bar3, text="Twitch...", command=self.link_twitch_selected).pack(side="left", padx=4)
         ttk.Button(bar3, text="Open Twitch", command=self.open_twitch_selected).pack(side="left")
         ttk.Button(bar3, text="Guess Twitch", command=self.guess_twitch).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Never link", command=self.never_link_selected).pack(side="left")
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
@@ -313,6 +314,8 @@ class App:
             if tw_live:
                 v = a["twitch_viewers"]
                 tw_text = f"LIVE {v} - {a['twitch_name']}" if v is not None else f"LIVE - {a['twitch_name']}"
+            elif a["twitch_never"] is not None:
+                tw_text = "never link" + (f" ({a['twitch_never']})" if a["twitch_never"] else "")
             else:
                 tw_text = a["twitch_name"] or ""
             iid = self.tree.insert(
@@ -554,6 +557,11 @@ class App:
             return self.twitch_setup_dialog()
         aid = ids[0]
         gamertag = self.tree.set(str(aid), "gamertag")
+        if self.db.twitch_never([aid]):
+            if not messagebox.askyesno("Twitch", f"{gamertag} is marked 'never link'. Remove that mark?"):
+                return
+            self.db.clear_twitch_never([aid])
+            self.reload()
         cur = self.db.twitch_links([aid])
         name = self._ask_tag(
             "Link Twitch", f"Twitch channel for {gamertag}\n(name, @name or twitch.tv link; empty removes the link)"
@@ -584,23 +592,27 @@ class App:
         self._set_busy("twitchlink", False)
         if err:
             return self.set_status(f"Could not link Twitch: {err}", error=True)
-        self.db.link_twitch(account_id, user.id, user.login, user.display_name)
+        try:
+            self.db.link_twitch(account_id, user.id, user.login, user.display_name)
+        except ValueError as e:
+            return self.set_status(f"Could not link Twitch: {e}", error=True)
         self.set_status(f"Linked to Twitch channel {user.display_name} (ID {user.id}).")
         self.reload()
         self.twitch_check_now(manual=True)
 
     def guess_twitch(self):
-        """Suggest Twitch channels with the same name as the gamertag (selected players, or the 20 most recent)."""
+        """Suggest Twitch channels with the same name as the gamertag (selected players, or every player without a
+        Twitch channel). Players marked 'never link' are skipped."""
         if not self.tcreds.configured():
             return self.set_status("Twitch is not set up. Use 'Twitch setup...' first.", error=True)
         if "twitchguess" in self.busy:
             return
         rows = self.db.list_accounts(owner=self.xkey.active())
         sel = set(self._selected_ids())
-        pick = [r for r in rows if r["id"] in sel] if sel else             sorted([r for r in rows if r["pos"] is not None and r["pos"] < 20], key=lambda r: r["pos"])
-        players = [(r["id"], r["gamertag"]) for r in pick if not r["twitch_id"]]
+        pick = [r for r in rows if r["id"] in sel] if sel else rows
+        players = [(r["id"], r["gamertag"]) for r in pick if not r["twitch_id"] and r["twitch_never"] is None]
         if not players:
-            return self.set_status("Nothing to guess: those players already have a Twitch channel linked.")
+            return self.set_status("Nothing to guess: those players have a Twitch channel or are marked 'never link'.")
         self._set_busy("twitchguess", True)
         self.set_status(f"Looking for Twitch channels named like {len(players)} player(s)...")
 
@@ -628,7 +640,9 @@ class App:
             "These channels only have the SAME NAME as the gamertag. They can be a different person. Open a channel "
             "to check, then select the right ones and press 'Link selected'. Only linked channels are tracked.")
         ).pack(fill="x", padx=10, pady=(10, 4))
-        tv = ttk.Treeview(win, columns=("player", "channel", "status"), show="headings", height=min(len(sugg), 12))
+        box = ttk.Frame(win)
+        box.pack(fill="both", expand=True, padx=10, pady=4)
+        tv = ttk.Treeview(box, columns=("player", "channel", "status"), show="headings", height=min(len(sugg), 12))
         for c, t, w in (("player", "Player", 180), ("channel", "Possible Twitch channel", 180), ("status", "Twitch now", 340)):
             tv.heading(c, text=t)
             tv.column(c, width=w, anchor="w")
@@ -638,17 +652,40 @@ class App:
             status = (f"LIVE: {g['game'] or 'no game set'} ({g['viewers']} viewers)" if g["live"] else "offline")
             iid = tv.insert("", "end", values=(g["gamertag"], g["name"], status), tags=("live",) if g["live"] else ())
             rows[iid] = g
-        tv.pack(fill="both", expand=True, padx=10, pady=4)
+        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
 
         def link_selected():
             chosen = [rows[i] for i in tv.selection()]
+            done = 0
             for g in chosen:
-                self.db.link_twitch(g["account_id"], g["id"], g["login"], g["name"])
+                try:
+                    self.db.link_twitch(g["account_id"], g["id"], g["login"], g["name"])
+                    done += 1
+                except ValueError:                                   # marked 'never link' meanwhile
+                    pass
             if chosen:
-                self.set_status(f"Linked {len(chosen)} Twitch channel(s) you confirmed.")
+                self.set_status(f"Linked {done} Twitch channel(s) you confirmed.")
                 win.destroy()
                 self.reload()
                 self.twitch_check_now(manual=True)
+
+        def never_selected():
+            chosen = {rows[i]["account_id"]: rows[i]["gamertag"] for i in tv.selection()}
+            if not chosen:
+                return
+            reason = self._ask_tag("Never link", f"Never link a Twitch channel for {len(chosen)} player(s).\n"
+                                   "Reason (optional, e.g. cheater):", ["cheater"], True)
+            if reason is None:
+                return
+            self.db.set_twitch_never(list(chosen), reason)
+            for i in list(tv.get_children()):
+                if rows[i]["account_id"] in chosen:
+                    tv.delete(i)
+            self.set_status(f"Marked {len(chosen)} player(s) 'never link'.")
+            self.reload()
 
         def open_channel():
             for i in tv.selection():
@@ -659,9 +696,28 @@ class App:
         bar.pack(pady=(4, 10))
         ttk.Button(bar, text="Link selected", command=link_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="Open channel", command=open_channel).pack(side="left", padx=4)
+        ttk.Button(bar, text="Never link player", command=never_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="left", padx=4)
         win.guess_tv, win.link_selected = tv, link_selected          # kept for tests
         self._place_dialog(win, 740, 160 + 24 * min(len(sugg), 12))
+
+    def never_link_selected(self):
+        """Toggle 'never link a Twitch channel' (cheaters, ...) for the selected players."""
+        ids = self._selected_ids()
+        if not ids:
+            return self.set_status("Select the player(s) that should never get a Twitch channel.", error=True)
+        marked = self.db.twitch_never(ids)
+        if len(marked) == len(ids):
+            self.db.clear_twitch_never(ids)
+            self.set_status(f"Removed the 'never link' mark from {len(ids)} player(s).")
+            return self.reload()
+        reason = self._ask_tag("Never link", f"Never link a Twitch channel for {len(ids)} player(s).\n"
+                               "Reason (optional, e.g. cheater):", ["cheater"], True)
+        if reason is None:
+            return
+        self.db.set_twitch_never(ids, reason)
+        self.set_status(f"Marked {len(ids)} player(s) 'never link'. Guess Twitch skips them.")
+        self.reload()
 
     def open_twitch_selected(self):
         links = self.db.twitch_links(self._selected_ids())
