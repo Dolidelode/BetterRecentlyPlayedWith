@@ -571,6 +571,23 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     states = [mw.matches_tv.item(i, "values")[4] for i in mw.matches_tv.get_children()]
     assert states == ["collecting proof: 1 of 3"]
     mw.destroy()
+    real_refresh, refreshed, game = app.refresh_now, [], [False]
+    app.refresh_now = lambda manual=True: refreshed.append(manual)
+    app.game_check = lambda: game[0]
+    assert app.only_game.get()                         # on by default
+    app._tick()
+    assert refreshed == [] and "not open" in app.status.get()
+    game[0] = True
+    app._tick()
+    game[0] = False
+    app._tick()                                        # one last round right after the game closes
+    app._tick()
+    assert refreshed == [False, False]
+    app.only_game.set(False)
+    app._save_only_game()
+    app._tick()
+    assert refreshed == [False, False, False] and d.get_setting("only_with_game") == "0"
+    app.refresh_now = real_refresh
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
     app.live_check_now()
@@ -836,3 +853,9 @@ def test_openxbl_body_level_errors(monkeypatch, tmp_path):
     from brpw.live import LiveChecker
     ck = LiveChecker(d, keys)
     assert "pause" in ck.run_cycle() and ck.budget_left() == 0
+
+
+def test_game_detection():
+    from brpw.game import game_running, running_processes
+    assert game_running({"explorer.exe", "sotgame.exe"}) and not game_running({"explorer.exe"})
+    assert isinstance(running_processes(), set)

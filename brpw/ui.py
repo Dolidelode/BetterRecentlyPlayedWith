@@ -12,6 +12,7 @@ from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         find_gamertag, lookup_gamertag)
 from .automatch import HITS_NEEDED, AutoMatcher
+from .game import game_running
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
@@ -76,6 +77,8 @@ class App:
         self.q: "queue.Queue" = queue.Queue()
         self.closing = False
         self.paused = db.get_setting("paused", "0") == "1"
+        self.game_check = game_running     # replaced in tests
+        self.game_was_running = False
         self.theme = clamp(db.get_setting("theme"))
         self.pal = palette(self.theme)
         self.status_error = False
@@ -179,6 +182,9 @@ class App:
         sp.pack(side="left")
         sp.bind("<FocusOut>", lambda e: self._save_interval())
         ttk.Label(bar, text="s").pack(side="left", padx=2)
+        self.only_game = tk.BooleanVar(value=self.db.get_setting("only_with_game", "1") == "1")
+        ttk.Checkbutton(bar, text="only while SoT is open", variable=self.only_game,
+                        command=self._save_only_game).pack(side="left", padx=(10, 0))
         ttk.Button(bar, text="Check for updates", command=lambda: threading.Thread(
             target=self._update_check, args=(True,), daemon=True).start()).pack(side="right")
         self.theme_var = tk.StringVar(value=self.pal["name"])
@@ -1388,9 +1394,29 @@ class App:
 
     def _tick(self):
         self.after_id = None
-        if self._provider():
+        if self._provider() and self._game_allows_refresh():
             self.refresh_now(manual=False)
         self._schedule()
+
+    def _game_allows_refresh(self) -> bool:
+        """With 'only while Sea of Thieves is open' on, auto-refresh skips rounds while the game is closed. The first
+        round after the game closes still runs, so the players of the last session are picked up."""
+        if not self.only_game.get():
+            return True
+        try:
+            running = self.game_check()
+        except Exception:
+            return True                              # can't tell: keep refreshing as before
+        if running or self.game_was_running:
+            self.game_was_running = running
+            return True
+        self.set_status("Auto-refresh waiting: Sea of Thieves is not open. 'Refresh now' still works.")
+        return False
+
+    def _save_only_game(self):
+        self.db.set_setting("only_with_game", "1" if self.only_game.get() else "0")
+        self.set_status("Auto-refresh only runs while Sea of Thieves is open." if self.only_game.get()
+                        else "Auto-refresh runs whether or not the game is open.")
 
     def _finish(self, out: "SyncOutcome | None", imported=False):
         if out is None:
