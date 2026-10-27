@@ -20,6 +20,7 @@ from .twitch import (CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, Tw
                      login_candidates)
 
 MIN_INTERVAL = 30
+REFRESH_MODES = ("Only while SoT is open", "Always", "Off")
 
 
 class _MemCreds:
@@ -173,8 +174,13 @@ class App:
         bar = ttk.Frame(r)
         bar.pack(fill="x", padx=8, pady=(8, 4))
         ttk.Button(bar, text="Refresh now", command=self.refresh_now).pack(side="left")
-        self.pause_btn = ttk.Button(bar, text="", command=self.toggle_pause)
-        self.pause_btn.pack(side="left", padx=4)
+        ttk.Label(bar, text="Auto-refresh").pack(side="left", padx=(12, 4))
+        self.mode_var = tk.StringVar(value=REFRESH_MODES[2] if self.paused else
+                                     REFRESH_MODES[0] if self.db.get_setting("only_with_game", "1") == "1"
+                                     else REFRESH_MODES[1])
+        mb = ttk.Combobox(bar, textvariable=self.mode_var, state="readonly", width=21, values=REFRESH_MODES)
+        mb.pack(side="left")
+        mb.bind("<<ComboboxSelected>>", lambda e: self.set_refresh_mode(self.mode_var.get()))
         ttk.Label(bar, text="every").pack(side="left", padx=(8, 2))
         self.interval = tk.IntVar(value=int(self.db.get_setting("interval", "60")))
         sp = ttk.Spinbox(bar, from_=MIN_INTERVAL, to=3600, increment=10, width=5, textvariable=self.interval,
@@ -182,21 +188,15 @@ class App:
         sp.pack(side="left")
         sp.bind("<FocusOut>", lambda e: self._save_interval())
         ttk.Label(bar, text="s").pack(side="left", padx=2)
-        self.only_game = tk.BooleanVar(value=self.db.get_setting("only_with_game", "1") == "1")
-        ttk.Checkbutton(bar, text="only while SoT is open", variable=self.only_game,
-                        command=self._save_only_game).pack(side="left", padx=(10, 0))
-        ttk.Button(bar, text="Check for updates", command=lambda: threading.Thread(
-            target=self._update_check, args=(True,), daemon=True).start()).pack(side="right")
+        self.auto_upd = tk.BooleanVar(value=self.db.get_setting("auto_update_check", "1") == "1")
+        self.upd_btn = ttk.Button(bar, text="Updates ▾", command=self._updates_menu)
+        self.upd_btn.pack(side="right")
         self.theme_var = tk.StringVar(value=self.pal["name"])
         tb = ttk.Combobox(bar, textvariable=self.theme_var, state="readonly", width=14,
                           values=[t[0] for t in THEMES])
         tb.pack(side="right", padx=(0, 6))
         tb.bind("<<ComboboxSelected>>", lambda e: self.set_theme(tb.current() + 1))
         ttk.Label(bar, text="Theme").pack(side="right", padx=(0, 4))
-        self.auto_upd = tk.BooleanVar(value=self.db.get_setting("auto_update_check", "1") == "1")
-        ttk.Checkbutton(bar, text="auto-check", variable=self.auto_upd,
-                        command=lambda: self.db.set_setting("auto_update_check", "1" if self.auto_upd.get() else "0")
-                        ).pack(side="right", padx=6)
 
         acct = ttk.Frame(r)
         acct.pack(fill="x", padx=8, pady=4)
@@ -275,7 +275,6 @@ class App:
         self.spinner.pack(side="left", padx=(0, 6))
         self.status_lbl = ttk.Label(statusbar, textvariable=self.status, anchor="w")
         self.status_lbl.pack(side="left", fill="x", expand=True)
-        self._update_pause_label()
         self.set_status("Ready. Add an OpenXBL account or use Import to add players.")
 
     # ---- helpers ----
@@ -423,8 +422,16 @@ class App:
         else:
             self.spinner.stop()
 
-    def _update_pause_label(self):
-        self.pause_btn.configure(text="Resume auto-refresh" if self.paused else "Pause auto-refresh")
+    def _updates_menu(self):
+        m = tk.Menu(self.root, tearoff=0, bg=self.pal["panel"], fg=self.pal["fg"], selectcolor=self.pal["fg"],
+                    activebackground=self.pal["accent"], activeforeground=self.pal["bg"])
+        m.add_command(label="Check now", command=lambda: threading.Thread(
+            target=self._update_check, args=(True,), daemon=True).start())
+        m.add_checkbutton(label="Check at startup", variable=self.auto_upd, command=lambda: self.db.set_setting(
+            "auto_update_check", "1" if self.auto_upd.get() else "0"))
+        self.updates_menu = m
+        b = self.upd_btn
+        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
 
     def _save_interval(self):
         try:
@@ -1284,11 +1291,16 @@ class App:
         self.reload()                                # shows the Twitch icon for anyone confirmed live
         self._show_live_results(results)
 
-    def toggle_pause(self):
-        self.paused = not self.paused
+    def set_refresh_mode(self, mode: str):
+        """'Only while SoT is open', 'Always' or 'Off' (Off also stops the background live and Twitch checks)."""
+        self.mode_var.set(mode)
+        self.paused = mode == REFRESH_MODES[2]
         self.db.set_setting("paused", "1" if self.paused else "0")
-        self._update_pause_label()
-        self.set_status("Auto-refresh paused." if self.paused else "Auto-refresh resumed.")
+        if not self.paused:
+            self.db.set_setting("only_with_game", "1" if mode == REFRESH_MODES[0] else "0")
+        self.set_status({REFRESH_MODES[0]: "Auto-refresh only runs while Sea of Thieves is open.",
+                         REFRESH_MODES[1]: "Auto-refresh always runs.",
+                         REFRESH_MODES[2]: "Auto-refresh is off. 'Refresh now' still works."}[mode])
         self._schedule()
 
     def export(self):
@@ -1401,7 +1413,7 @@ class App:
     def _game_allows_refresh(self) -> bool:
         """With 'only while Sea of Thieves is open' on, auto-refresh skips rounds while the game is closed. The first
         round after the game closes still runs, so the players of the last session are picked up."""
-        if not self.only_game.get():
+        if self.mode_var.get() != REFRESH_MODES[0]:
             return True
         try:
             running = self.game_check()
@@ -1412,11 +1424,6 @@ class App:
             return True
         self.set_status("Auto-refresh waiting: Sea of Thieves is not open. 'Refresh now' still works.")
         return False
-
-    def _save_only_game(self):
-        self.db.set_setting("only_with_game", "1" if self.only_game.get() else "0")
-        self.set_status("Auto-refresh only runs while Sea of Thieves is open." if self.only_game.get()
-                        else "Auto-refresh runs whether or not the game is open.")
 
     def _finish(self, out: "SyncOutcome | None", imported=False):
         if out is None:

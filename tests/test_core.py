@@ -574,7 +574,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     real_refresh, refreshed, game = app.refresh_now, [], [False]
     app.refresh_now = lambda manual=True: refreshed.append(manual)
     app.game_check = lambda: game[0]
-    assert app.only_game.get()                         # on by default
+    assert app.mode_var.get() == ui.REFRESH_MODES[0]   # 'only while SoT is open' by default
     app._tick()
     assert refreshed == [] and "not open" in app.status.get()
     game[0] = True
@@ -583,10 +583,13 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._tick()                                        # one last round right after the game closes
     app._tick()
     assert refreshed == [False, False]
-    app.only_game.set(False)
-    app._save_only_game()
+    app.set_refresh_mode("Always")
     app._tick()
     assert refreshed == [False, False, False] and d.get_setting("only_with_game") == "0"
+    app.set_refresh_mode("Off")
+    assert app.paused and app.after_id is None and d.get_setting("paused") == "1"
+    app.set_refresh_mode("Only while SoT is open")
+    assert not app.paused and app.after_id and d.get_setting("only_with_game") == "1"
     app.refresh_now = real_refresh
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker
