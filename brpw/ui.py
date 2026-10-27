@@ -88,7 +88,7 @@ class App:
         self.tcreds = TwitchCreds(data_dir() / "twitch.json")
         self.tclient = TwitchClient(self.tcreds)
         self.tcheck = TwitchChecker(db, self.tclient)
-        self.matcher = AutoMatcher(db, self.tclient)
+        self.matcher = AutoMatcher(db, self.tclient, live=self.live)
         self.twitch_after_id = None
         self.twitch_busy = False
         self._build()
@@ -987,8 +987,9 @@ class App:
         ttk.Label(win, style="Hint.TLabel", wraplength=760, justify="left", text=(
             "The app watches players with a similar Twitch name. A pair is linked only after the player was in Sea of "
             f"Thieves during {HITS_NEEDED} different streams of that channel, and never when the channel streamed "
-            "while the player was offline or in another game. Same name alone proves nothing. Uses your 20 most "
-            "recent players (the ones whose Xbox status the app checks).")).pack(fill="x", padx=10, pady=(10, 4))
+            "while the player was offline or in another game. Same name alone proves nothing. Covers every player "
+            "in your history: when a look-alike channel goes live, the app asks Xbox about that player right away "
+            "(within your OpenXBL hourly limit).")).pack(fill="x", padx=10, pady=(10, 4))
         box = ttk.Frame(win)
         box.pack(fill="both", expand=True, padx=10, pady=4)
         tv = ttk.Treeview(box, columns=("player", "channel", "hits", "misses", "state"), show="headings", height=12)
@@ -1049,10 +1050,8 @@ class App:
             webbrowser.open(f"https://www.twitch.tv/{l['login']}")
 
     def twitch_check_now(self, manual=False):
-        """Auto-matcher round (only when there is fresh Xbox presence to compare), then live status of the links."""
+        """Auto-matcher round (live SoT streams vs. Xbox presence), then live status of the links."""
         if self.twitch_busy or not self.tcreds.configured():
-            return
-        if not self.db.twitch_links() and not self.matcher.players():
             return
         self.twitch_busy = True
         self._set_busy("twitch", True)

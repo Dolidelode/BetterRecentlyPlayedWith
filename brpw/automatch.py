@@ -10,7 +10,8 @@ Each Twitch stream (its start time) counts once: seen in the game at any moment 
 (streamers load in late and leave early), and "not in the game" only counts after the stream has run MISS_AFTER.
 A pair is linked automatically after HITS_NEEDED different streams with hits and not a single miss; one miss rules
 the pair out for good, and so does the user removing an auto link.
-Xbox presence comes from the live checks the app already makes (recent players only), Twitch from Get Streams.
+Xbox presence comes from the regular live checks (20 most recent players) plus one targeted check per round for
+any player in the history whose look-alike channel is live right now; Twitch from Get Streams.
 """
 import re
 import time
@@ -65,9 +66,43 @@ def in_sot(state, title) -> bool:
     return (state or "").casefold() == "online" and SOT in (title or "").casefold()
 
 
+TARGETED_PER_ROUND = 10        # players asked about per round = 1 OpenXBL request
+KEEP_FOR_REGULAR = 6           # never use the last few hourly OpenXBL requests for targeted checks
+
+
 class AutoMatcher:
-    def __init__(self, db, client, now: Callable[[], float] = time.time):
-        self.db, self.client, self.now = db, client, now
+    def __init__(self, db, client, now: Callable[[], float] = time.time, live=None):
+        self.db, self.client, self.now, self.live = db, client, now, live
+
+    def targets(self, streams) -> List[int]:
+        """Players anywhere in the history whose similar-name channel is live now, whose Xbox status is not fresh,
+        and whose pair is still undecided. Asking Xbox about them right now turns that stream into evidence."""
+        t = int(self.now())
+        decided = {(m["account_id"], m["twitch_id"]) for m in self.db.match_summary() if m["misses"]}
+        with self.db.lock:
+            rows = self.db.conn.execute(
+                """SELECT a.id, a.gamertag, s.checked_at FROM accounts a LEFT JOIN live_status s ON s.account_id=a.id
+                   WHERE a.xuid IS NOT NULL
+                     AND NOT EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=a.id)
+                     AND NOT EXISTS(SELECT 1 FROM twitch_never n WHERE n.account_id=a.id)""").fetchall()
+        taken = {l["twitch_id"] for l in self.db.twitch_links()}
+        out = []
+        for r in rows:
+            if r["checked_at"] is not None and t - r["checked_at"] < PRESENCE_MAX_AGE:
+                continue                                          # fresh already: run() will use it
+            if any(s["id"] not in taken and (r["id"], s["id"]) not in decided
+                   and (similar(r["gamertag"], s["login"]) or similar(r["gamertag"], s["name"])) for s in streams):
+                out.append(r["id"])
+        return out[:TARGETED_PER_ROUND]
+
+    def refresh_targets(self, streams) -> int:
+        """One targeted Xbox request for the players above, if the hourly OpenXBL budget allows it."""
+        if self.live is None or self.live.budget_left() <= KEEP_FOR_REGULAR:
+            return 0
+        ids = self.targets(streams)
+        if ids:
+            self.live.check_accounts(ids, limit=TARGETED_PER_ROUND)
+        return len(ids)
 
     def players(self) -> List[dict]:
         """Players with a fresh Xbox presence and no Twitch link and no 'never link' mark."""
@@ -82,11 +117,15 @@ class AutoMatcher:
 
     def run(self, streams=None) -> List[dict]:
         """One round. Returns the links made in this round ({account_id, gamertag, login, name, hits})."""
+        if streams is None:
+            streams = self.client.game_streams(max_pages=3)
+        try:
+            self.refresh_targets(streams)
+        except Exception:                                         # Xbox trouble must not stop the Twitch side
+            pass
         players = self.players()
         if not players:
             return []
-        if streams is None:
-            streams = self.client.game_streams(max_pages=3)
         now = int(self.now())
         for p in players:
             for s in streams:

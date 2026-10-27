@@ -156,8 +156,62 @@ def test_channel_already_linked_to_someone_else_is_not_reused(db):
     assert db.twitch_links([i["Salty Pirate"]]) == []
 
 
-def test_no_players_means_no_twitch_request(db):
-    class NoCalls:
+def test_without_look_alikes_nothing_is_asked(db):
+    class Streams:
         def game_streams(self, **k):
-            raise AssertionError("should not ask Twitch")
-    assert AutoMatcher(db, NoCalls(), now=Clock()).run() == []
+            return [{"id": "1", "login": "unrelated_name", "name": "Unrelated_Name", "started": 1}]
+    c = Clock()
+    live = FakeLive(db, c, ("Online", "Sea of Thieves"))
+    assert AutoMatcher(db, Streams(), now=c, live=live).run() == [] and live.asked == []
+
+
+class FakeLive:
+    """Stands in for LiveChecker: records targeted checks and stores the presence Xbox would return."""
+
+    def __init__(self, db, clock, answer, budget=30):
+        self.db, self.clock, self.answer, self.budget, self.asked = db, clock, answer, budget, []
+
+    def budget_left(self):
+        return self.budget
+
+    def check_accounts(self, ids, limit=10):
+        self.asked.append(list(ids))
+        self.budget -= 1
+        for aid in ids:
+            presence(self.db, aid, *self.answer, int(self.clock()))
+
+
+def test_any_player_in_history_is_checked_when_a_look_alike_goes_live(db):
+    i, c = ids(db), Clock()
+    started = c.t
+    c.t += 15 * 60
+    live = FakeLive(db, c, ("Online", "Sea of Thieves"))
+    m = AutoMatcher(db, client=None, now=c, live=live)
+    m.run([stream("77", "saltypirate", started), stream("80", "someone_else", started)])
+    assert live.asked == [[i["Salty Pirate"]]]                        # only the look-alike's player, one request
+    assert db.match_summary()[0]["hits"] == 1
+    m.run([stream("77", "saltypirate", started)])
+    assert len(live.asked) == 1                                       # fresh now: no second request
+
+
+def test_targeted_checks_respect_budget_and_skip_decided_pairs(db):
+    i, c = ids(db), Clock()
+    started = c.t
+    c.t += 15 * 60
+    live = FakeLive(db, c, ("Offline", ""), budget=6)
+    AutoMatcher(db, client=None, now=c, live=live).run([stream("77", "saltypirate", started)])
+    assert live.asked == []                                           # last hourly requests kept for regular checks
+    live.budget = 30
+    AutoMatcher(db, client=None, now=c, live=live).run([stream("77", "saltypirate", started)])
+    assert db.match_summary()[0]["misses"] == 1                       # offline while the look-alike streamed
+    c.t += PRESENCE_MAX_AGE + 1
+    AutoMatcher(db, client=None, now=c, live=live).run([stream("77", "saltypirate", started)])
+    assert len(live.asked) == 1                                       # ruled out: not asked about again
+
+
+def test_xbox_errors_do_not_stop_the_round(db):
+    class Broken(FakeLive):
+        def check_accounts(self, ids, limit=10):
+            raise RuntimeError("OpenXBL down")
+    c = Clock()
+    assert AutoMatcher(db, client=None, now=c, live=Broken(db, c, None)).run([stream("77", "saltypirate", c.t)]) == []
