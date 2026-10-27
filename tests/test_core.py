@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tkinter as tk
+from tkinter import ttk
 
 import pytest
 
@@ -465,6 +466,11 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
                st("901", "unlinkedpirate", 3), st("902", "stranger", 1, "nl")]
     app._on_sot_streams(streams, None)
     sw = app.sot_win
+    sw.geometry("900x320")                                             # small window: buttons must stay visible
+    root.update()
+    btn = [w for f in sw.winfo_children() for w in f.winfo_children()
+           if isinstance(w, ttk.Button) and w.cget("text") == "Find on SOTREP"][0]
+    assert btn.winfo_ismapped() and btn.winfo_rooty() + btn.winfo_height() <= sw.winfo_rooty() + sw.winfo_height()
     count = lambda: len(sw.streams_tv.get_children())
     vals = [sw.streams_tv.item(i, "values") for i in sw.streams_tv.get_children()]
     assert vals[0][0] == "linked: Old" and vals[1][0] == "same name: Unlinked Pirate" and vals[2][1] == "Big_One"

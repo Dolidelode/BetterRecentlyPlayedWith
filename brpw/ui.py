@@ -698,7 +698,7 @@ class App:
 
         tv.bind("<Double-1>", lambda e: open_channel())
         bar = ttk.Frame(win)
-        bar.pack(pady=(4, 10))
+        bar.pack(side="bottom", pady=(4, 10), before=box)            # buttons first: always visible
         ttk.Button(bar, text="Link selected", command=link_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="Open channel", command=open_channel).pack(side="left", padx=4)
         ttk.Button(bar, text="Never link player", command=never_selected).pack(side="left", padx=4)
@@ -791,7 +791,7 @@ class App:
         box.pack(fill="both", expand=True, padx=10, pady=4)
         cols = (("match", "Your player", 160), ("channel", "Channel", 140), ("viewers", "Viewers", 60),
                 ("uptime", "Live for", 65), ("lang", "Lang", 45), ("title", "Title", 330), ("tags", "Tags", 180))
-        tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=16)
+        tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=14)
         sort = {"col": None, "desc": False}
         keys = {"match": lambda s: (not match(s), match(s).casefold()), "channel": lambda s: s["name"].casefold(),
                 "viewers": lambda s: s["viewers"], "uptime": lambda s: -(s["started"] or 0),
@@ -857,7 +857,7 @@ class App:
             v.trace_add("write", remember)
         fill()
         bar = ttk.Frame(win)
-        bar.pack(fill="x", padx=10, pady=(4, 10))
+        bar.pack(side="bottom", fill="x", padx=10, pady=(4, 10), before=box)   # always visible
         ttk.Label(bar, text="Player:").pack(side="left")
         pvar = tk.StringVar()
         sel = self._selected_ids()
@@ -960,7 +960,8 @@ class App:
         win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
         win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
         win.find_on_sotrep = find_on_sotrep
-        self._place_dialog(win, 1040, 540)
+        win.minsize(760, 300)
+        self._place_dialog(win, 1040, 560)
 
     @staticmethod
     def _match_state(m) -> str:
@@ -1017,7 +1018,7 @@ class App:
 
         tv.bind("<Double-1>", lambda e: open_channel())
         bar = ttk.Frame(win)
-        bar.pack(pady=(4, 10))
+        bar.pack(side="bottom", pady=(4, 10), before=box)            # buttons first: always visible
         ttk.Button(bar, text="Open channel", command=open_channel).pack(side="left", padx=4)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="left", padx=4)
         win.matches_tv = tv                                          # kept for tests
