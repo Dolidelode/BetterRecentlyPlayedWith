@@ -403,6 +403,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._on_tree_click(ev("gamertag"))
     assert opened == ["https://www.twitch.tv/example_streamer"] * 2
     assert app._twitch_cell(ev("twitch")) and not app._twitch_cell(ev("gamertag"))
+    # right-click menu: every per-player action, enabled only when it applies
+    app.tree.selection_set(str(by["Old"]))
+    items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
+    assert items["Open Twitch"] and items["Link Twitch channel..."] and "Never link..." in items
+    assert set(items) >= {"Open SOTREP", "Check live", "Encounters", "Tag...", "Untag", "Guess Twitch"}
+    app.tree.selection_set([str(by["Old"]), str(by["New2"])])
+    items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
+    assert not items["Link Twitch channel..."]                       # needs exactly one player
     opened.clear()
     app.twitch_check_now = lambda *a, **k: None                                # no network in these steps
     app._on_twitch_link(by["New2"], tw_mod.TwitchUser("55", "new_two", "New_Two"), None)

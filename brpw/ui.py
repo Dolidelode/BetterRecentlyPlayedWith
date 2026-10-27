@@ -162,7 +162,7 @@ class App:
     def _build(self):
         r = self.root
         r.title(f"Better Recently Played With {__version__}")
-        r.geometry("1130x540")
+        r.geometry("1000x540")
         r.minsize(760, 380)
         self._apply_style()
         self._apply_icon()
@@ -246,15 +246,13 @@ class App:
 
         bar3 = ttk.Frame(self.players_tab)
         bar3.pack(fill="x", padx=8, pady=4)
-        ttk.Button(bar3, text="Open SOTREP", command=self.open_selected).pack(side="left")
-        ttk.Button(bar3, text="Tag...", command=self.tag_selected).pack(side="left", padx=4)
-        ttk.Button(bar3, text="Untag", command=self.untag_selected).pack(side="left")
-        ttk.Button(bar3, text="Encounters", command=self.encounters_dialog).pack(side="left", padx=4)
+        # per-player actions live in the right-click menu; only whole-list actions are buttons
         ttk.Button(bar3, text="Check live", command=self.check_live_selected).pack(side="left")
-        ttk.Button(bar3, text="Twitch...", command=self.link_twitch_selected).pack(side="left", padx=4)
-        ttk.Button(bar3, text="Open Twitch", command=self.open_twitch_selected).pack(side="left")
         ttk.Button(bar3, text="Guess Twitch", command=self.guess_twitch).pack(side="left", padx=4)
-        ttk.Button(bar3, text="Never link", command=self.never_link_selected).pack(side="left")
+        ttk.Label(bar3, text="Right-click a player for more", style="Hint.TLabel").pack(side="left", padx=(6, 0))
+        self.tree.bind("<Button-3>", self._row_menu)
+        self.tree.bind("<Shift-F10>", self._row_menu)
+        self.tree.bind("<App>", self._row_menu)
         self.count_lbl = ttk.Label(bar3, text="")
         self.count_lbl.pack(side="right")
         legend = tk.Label(bar3, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
@@ -359,6 +357,55 @@ class App:
         elif self.tree.item(row, "image"):
             self.set_status("Xbox says this player is broadcasting, but no Twitch channel is linked yet. "
                             "Use 'Twitch...' or 'Live SoT streams' to link it.")
+
+    def _row_menu_items(self):
+        """(label, command or None for a separator, enabled) for the right-click menu of the current selection."""
+        ids = self._selected_ids()
+        one = len(ids) == 1
+        linked = bool(self.db.twitch_links(ids))
+        never = self.db.twitch_never(ids)
+        all_never = bool(ids) and len(never) == len(ids)
+        return [
+            ("Open SOTREP", self.open_selected, True),
+            ("Open Twitch", self.open_twitch_selected, linked),
+            ("Check live", self.check_live_selected, True),
+            ("Encounters", self.encounters_dialog, True),
+            (None, None, True),
+            ("Tag...", self.tag_selected, True),
+            ("Untag", self.untag_selected, True),
+            (None, None, True),
+            ("Link Twitch channel...", self.link_twitch_selected, one),
+            ("Guess Twitch", self.guess_twitch, True),
+            ("Allow linking again" if all_never else "Never link...", self.never_link_selected, True),
+        ]
+
+    def _row_menu(self, event):
+        """Right-click: act on the clicked player (or on the selection when the click is inside it)."""
+        row = self.tree.identify_row(event.y) if getattr(event, "y", None) is not None else ""
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+        if not self.tree.selection():
+            return
+        m = tk.Menu(self.root, tearoff=0, bg=self.pal["panel"], fg=self.pal["fg"],
+                    activebackground=self.pal["accent"], activeforeground=self.pal["bg"],
+                    disabledforeground=self.pal["muted"])
+        for label, cmd, enabled in self._row_menu_items():
+            if label is None:
+                m.add_separator()
+            else:
+                m.add_command(label=label, command=cmd, state="normal" if enabled else "disabled")
+        self.row_menu = m                                            # kept for tests
+        x = getattr(event, "x_root", None)
+        if x is None:                                                # keyboard: open next to the focused row
+            box = self.tree.bbox(self.tree.selection()[0]) or (0, 0, 0, 0)
+            x, y = self.tree.winfo_rootx() + 40, self.tree.winfo_rooty() + box[1] + box[3]
+        else:
+            y = event.y_root
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
 
     def _selected_ids(self):
         return [int(i) for i in self.tree.selection()]
