@@ -421,13 +421,7 @@ class Database:
             self.conn.execute("DELETE FROM twitch_status WHERE account_id=?", (account_id,))   # old status is stale now
 
     def unlink_twitch(self, account_ids: List[int]) -> None:
-        """Remove links. Removing an AUTO link also tells the auto-matcher never to suggest that pair again."""
         with self.lock, self.conn:
-            for a in account_ids:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO twitch_evidence(account_id,twitch_id,login,display_name,session,result,at) "
-                    "SELECT account_id,twitch_id,login,display_name,-1,0,? FROM twitch_links "
-                    "WHERE account_id=? AND source='auto'", (int(time.time()), a))
             self.conn.executemany("DELETE FROM twitch_links WHERE account_id=?", [(a,) for a in account_ids])
             self.conn.executemany("DELETE FROM twitch_status WHERE account_id=?", [(a,) for a in account_ids])
 
@@ -459,34 +453,6 @@ class Database:
         with self.lock:
             return {r[0]: r[1] for r in self.conn.execute(
                 f"SELECT account_id, reason FROM twitch_never WHERE account_id IN ({marks})", list(account_ids))}
-
-    # ---- auto-matcher evidence (see automatch.py) ----
-    def add_match_evidence(self, account_id: int, twitch_id: str, login: str, display_name: str,
-                           session: int, result: int, at: int) -> None:
-        """One observation for one Twitch stream; seen in the game once during a stream makes it a hit."""
-        with self.lock, self.conn:
-            self.conn.execute(
-                "INSERT INTO twitch_evidence(account_id,twitch_id,login,display_name,session,result,at) "
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_id,twitch_id,session) DO UPDATE SET "
-                "result=MAX(result, excluded.result), at=excluded.at, login=excluded.login, "
-                "display_name=excluded.display_name", (account_id, twitch_id, login, display_name, session, result, at))
-
-    def match_summary(self) -> List[sqlite3.Row]:
-        """Per (player, channel): streams online together (hits), streams that contradict it (misses), and state."""
-        with self.lock:
-            return self.conn.execute("""
-                SELECT e.account_id, a.gamertag, e.twitch_id, MAX(e.login) AS login, MAX(e.display_name) AS display_name,
-                       SUM(e.result = 1 AND e.session >= 0) AS hits, SUM(e.result = 0) AS misses,
-                       SUM(e.session = -1) AS rejected, MAX(e.at) AS last_at,
-                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=e.account_id) AS linked,
-                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=e.account_id
-                              AND l.twitch_id=e.twitch_id AND l.source='auto') AS auto_linked,
-                       EXISTS(SELECT 1 FROM twitch_never n WHERE n.account_id=e.account_id) AS never,
-                       EXISTS(SELECT 1 FROM twitch_links l WHERE l.twitch_id=e.twitch_id
-                              AND l.account_id<>e.account_id) AS channel_taken
-                FROM twitch_evidence e JOIN accounts a ON a.id=e.account_id
-                GROUP BY e.account_id, e.twitch_id
-                ORDER BY hits DESC, last_at DESC""").fetchall()
 
     def store_twitch_status(self, rows) -> None:
         with self.lock, self.conn:

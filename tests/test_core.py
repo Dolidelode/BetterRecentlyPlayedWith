@@ -380,7 +380,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
                            (by["New"], t_now, 0, None, None, None, None)])
     app.reload()
     twc = {app.tree.set(i, "gamertag"): (app.tree.set(i, "twitch"), app.tree.item(i, "image")) for i in app.tree.get_children()}
-    assert twc["Old"][0] == "LIVE 7 - Example_Streamer" and twc["Old"][1]        # Twitch says live: text and icon
+    assert twc["Old"][0] == "● 7  Example_Streamer" and twc["Old"][1]        # Twitch says live: text and icon
     assert twc["New"][0] == "Quiet_One" and not twc["New"][1]                 # linked but offline: name only, no icon
     assert twc["New2"][0] == ""                                               # nothing saved: empty
     app.sort_by("twitch")
@@ -461,7 +461,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._ask_tag = lambda *a, **k: "cheater"
     app.tree.selection_set(str(by["New2"]))
     app.never_link_selected()
-    assert app.tree.set(str(by["New2"]), "twitch") == "never link (cheater)" and not d.twitch_links([by["New2"]])
+    assert app.tree.set(str(by["New2"]), "twitch") == "⛔ cheater" and not d.twitch_links([by["New2"]])
     d.merge_players([Player("Unlinked Pirate", "9876543210")], "import", False)
     asked = []
     app.tclient.suggest = lambda players: asked.append(players) or []
@@ -561,16 +561,18 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert far["gamertag"] == "Far Away Pirate" and far["twitch_id"] == "902" and far["encounters"] == 0
     assert sw.player_var.get() == ""                                  # cleared after linking
     sw.destroy()
-    # auto matches: the window explains each pair, auto links are labelled in the list
-    d.add_match_evidence(by["New2"], "555", "newtwo", "NewTwo", 1, 1, 10)
+    # links made earlier by the (now removed) auto-matcher keep a small mark
     d.unlink_twitch([by["Old"]])
     d.link_twitch(by["Old"], "100200300", "example_streamer", "Example_Streamer", source="auto")
     app.reload()
-    assert app.tree.set(str(by["Old"]), "twitch").endswith("(auto)")
-    mw = app.auto_matches_dialog()
-    states = [mw.matches_tv.item(i, "values")[4] for i in mw.matches_tv.get_children()]
-    assert states == ["collecting proof: 1 of 3"]
-    mw.destroy()
+    assert app.tree.set(str(by["Old"]), "twitch") == "Example_Streamer ⚙"
+    # columns can be hidden from the header menu, and that is remembered
+    app.toggle_column("xuid")
+    assert "xuid" not in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == "xuid"
+    app._apply_hidden_columns()
+    assert "xuid" not in app.tree["displaycolumns"]
+    app.toggle_column("xuid")
+    assert "xuid" in app.tree["displaycolumns"]
     real_refresh, refreshed, game = app.refresh_now, [], [False]
     app.refresh_now = lambda manual=True: refreshed.append(manual)
     app.game_check = lambda: game[0]
