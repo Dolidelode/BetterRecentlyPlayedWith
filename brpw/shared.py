@@ -50,6 +50,11 @@ class SharedConfig:
                 return {"url": d["url"].rstrip("/"), "key": d["key"]}
         return None
 
+    def own_service(self) -> Optional[dict]:
+        """Only a list set up on this PC (Owner setup), never the bundled one: that one is not shown in the app."""
+        d = _read(self.data / SERVICE_FILE)
+        return {"url": d["url"].rstrip("/"), "key": d["key"]} if d.get("url") and d.get("key") else None
+
     def save_service(self, url: str, key: str) -> None:
         (self.data / SERVICE_FILE).write_text(json.dumps({"url": url.strip().rstrip("/"), "key": key.strip()}),
                                               encoding="utf-8")

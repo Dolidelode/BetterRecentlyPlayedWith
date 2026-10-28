@@ -179,8 +179,9 @@ def test_config_files(tmp_path):
     assert cfg.service() is None and cfg.admin_key() is None
     bundled.write_text('{"url": "https://b.supabase.co/", "key": "sb_publishable_b"}')
     assert cfg.service() == {"url": "https://b.supabase.co", "key": "sb_publishable_b"}
+    assert cfg.own_service() is None                                        # the bundled one is never "own"
     cfg.save_service("https://own.supabase.co", "sb_publishable_own")         # data dir wins over the bundled one
-    assert cfg.service()["url"] == "https://own.supabase.co"
+    assert cfg.service()["url"] == "https://own.supabase.co" == cfg.own_service()["url"]
     cfg.save_admin_key("sb_secret_x")
     assert cfg.admin_key() == "sb_secret_x"
     cfg.save_admin_key(None)
@@ -222,13 +223,21 @@ def test_shared_ui_send_review_approve(tmp_path, monkeypatch):
     win = app.shared_dialog()
     assert "no shared list" in win.state_var.get() and str(win.send_btn["state"]) == "disabled"
     win.destroy()
-    app.shared_cfg.save_service("https://x.supabase.co", PUB)               # a normal user's copy
+    app.shared_cfg.bundled.write_text('{"url": "https://x.supabase.co", "key": "%s"}' % PUB)   # a normal user's copy
     fake.master["2535400000000001"] = entry("2535400000000001", "Salty Pirate", "10", "salty")
     app.shared_sync(quiet=False)
     wait("shared")
     assert app.tree.set(str(i["Salty Pirate"]), "twitch") == "Salty" + ui.SHARED_MARK
     win = app.shared_dialog()
     assert "Send my links (1)" == win.send_btn["text"] and not win.review_btn.winfo_ismapped()
+    assert not win.setup_btn.winfo_manager()                                 # Owner setup hidden from users
+    sw = app.shared_setup_dialog()                                           # (Ctrl+Shift+O) built-in address not shown
+    assert sw.url_var.get() == "" and sw.key_var.get() == ""
+    sw.save()                                                                # empty = test the built-in list, save nothing
+    wait("sharesetup")
+    assert sw.state_var.get().startswith("Saved") and app.shared_cfg.own_service() is None
+    wait("shared")
+    sw.destroy()
     assert all(lbl != "Remove from master list" for lbl, *_ in app._row_menu_items())
     win.name_var.set("Bob")
     app.send_links(confirm=False)
@@ -237,6 +246,9 @@ def test_shared_ui_send_review_approve(tmp_path, monkeypatch):
     assert win.send_btn["text"] == "Send my links (0)"
     win.destroy()
     app.shared_cfg.save_admin_key(SECRET)                                    # the owner's copy
+    win = app.shared_dialog()
+    assert win.setup_btn.winfo_manager() == "pack" and win.review_btn.winfo_manager() == "pack"
+    win.destroy()
     app.tree.selection_set(str(i["Salty Pirate"]))
     assert ("Remove from master list", app.remove_from_master, True) in app._row_menu_items()
     rw = app.review_dialog()

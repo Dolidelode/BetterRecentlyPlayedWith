@@ -33,8 +33,9 @@ master list without your approval anyway.
 2. In the project: **SQL Editor** → New query → paste all of [`shared_list_setup.sql`](shared_list_setup.sql) → **Run**.
 3. **Project Settings → API Keys**: note the **Project URL**, the **publishable** key (`sb_publishable_...`)
    and a **secret** key (`sb_secret_...`).
-4. In the app: **Shared list... → Owner setup...** → paste the URL, the publishable key and the secret key →
-   **Save and test**. The owner tools now show in the Shared list window.
+4. In the app: **Shared list...** → press **Ctrl+Shift+O** (the Owner setup button is only shown once a PC has the
+   secret key) → paste the secret key, and the URL and publishable key unless the program already has them built in
+   (then leave those empty) → **Save and test**. The owner tools now show in the Shared list window.
 5. **Publish my links** puts your own links in the master list.
 
 Keep the secret key to yourself. The app stores it only in `%APPDATA%\BetterRecentlyPlayedWith\shared_admin.json`.
@@ -53,6 +54,10 @@ Normal users must not need setup, so the URL and the publishable key go into the
   release simply has no shared list.
 
 Never put the **secret** key in either place.
+
+The app never shows the built-in address and key: Owner setup is hidden from normal users and its fields stay empty
+unless that PC saved its own. They are still inside the program file and in its network traffic, so a determined person
+can find them; that is fine, because the database only lets that key read the list and add suggestions.
 
 ## Day to day
 

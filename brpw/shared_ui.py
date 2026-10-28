@@ -136,8 +136,13 @@ class SharedListMixin:
         publish_btn = ttk.Button(owner, text="Publish my links", command=self.publish_links)
         bottom = ttk.Frame(win)
         bottom.pack(side="bottom", pady=(4, 12))
-        ttk.Button(bottom, text="Owner setup...", command=self.shared_setup_dialog).pack(side="left", padx=4)
-        ttk.Button(bottom, text="Close", command=win.destroy).pack(side="left", padx=4)
+        setup_btn = ttk.Button(bottom, text="Owner setup...", command=self.shared_setup_dialog)
+        close_btn = ttk.Button(bottom, text="Close", command=win.destroy)
+        close_btn.pack(side="left", padx=4)
+        # Owner setup is only shown on the owner's PC; anyone else reaches it with Ctrl+Shift+O
+        win.bind("<Control-Shift-O>", lambda e: self.shared_setup_dialog())
+        win.bind("<Control-Shift-o>", lambda e: self.shared_setup_dialog())
+        win.setup_btn, win.close_btn = setup_btn, close_btn
         win.state_var, win.send_btn, win.owner_frame = state, send_btn, owner      # kept for tests
         win.review_btn, win.publish_btn, win.name_var, win.owner_lbl = review_btn, publish_btn, name_var, owner_lbl
         self._refresh_shared_win()
@@ -159,13 +164,14 @@ class SharedListMixin:
                     f"Your links the master list doesn't have yet (not sent before): {len(new)}.")
         win.state_var.set(text)
         win.send_btn.configure(text=f"Send my links ({len(new)})", state="normal" if configured and new else "disabled")
-        for w in (win.owner_lbl, win.review_btn, win.publish_btn):
+        for w in (win.owner_lbl, win.review_btn, win.publish_btn, win.setup_btn):
             w.pack_forget()
         if self.is_list_owner():
             mine = self.db.links_to_share(include_sent=True)
             win.publish_btn.configure(text=f"Publish my links ({len(mine)})", state="normal" if mine else "disabled")
             for w in (win.owner_lbl, win.review_btn, win.publish_btn):
                 w.pack(side="left", padx=4)
+            win.setup_btn.pack(side="left", padx=4, before=win.close_btn)
 
     def send_links(self, confirm=True):
         client = self._shared_client()
@@ -405,12 +411,13 @@ class SharedListMixin:
         win.transient(self.root)
         ttk.Label(win, style="Hint.TLabel", wraplength=540, justify="left", text=(
             "Only for the owner of a shared list. Normal users don't need this: their copy already knows where the "
-            "list is.\n\nProject URL and publishable key: from your Supabase project (Settings > API Keys). "
-            "Secret key: only on YOUR PC. It turns on the owner tools. It is stored in your app-data folder, never "
-            "in the repository or the program file. See docs/SHARED_LIST.md.")).pack(fill="x", padx=14, pady=(14, 6))
+            "list is.\n\nProject URL and publishable key: leave empty to use the list built into this program, or "
+            "paste them from your own Supabase project (Settings > API Keys). Secret key: only on YOUR PC. It turns "
+            "on the owner tools. It is stored in your app-data folder, never in the repository or the program file. "
+            "See docs/SHARED_LIST.md.")).pack(fill="x", padx=14, pady=(14, 6))
         form = ttk.Frame(win)
         form.pack(padx=14, pady=6)
-        svc = self.shared_cfg.service() or {}
+        svc = self.shared_cfg.own_service() or {}       # the built-in address is never shown
         url_var, key_var, sec_var = tk.StringVar(value=svc.get("url", "")), tk.StringVar(value=svc.get("key", "")), \
             tk.StringVar()
         for n, (label, var, show) in enumerate((("Project URL", url_var, ""), ("Publishable key", key_var, ""),
@@ -425,7 +432,12 @@ class SharedListMixin:
 
         def save():
             url, key, sec = url_var.get().strip(), key_var.get().strip(), sec_var.get().strip()
-            if not url.startswith("https://") or not key:
+            built_in = None
+            if not url and not key and not self.shared_cfg.own_service():
+                built_in = self.shared_cfg.service()        # the bundled list; used, but never saved or shown
+            if built_in:
+                url, key = built_in["url"], built_in["key"]
+            elif not url.startswith("https://") or not key:
                 return state.set("Paste the project URL (https://...) and the publishable key.")
             if sec and sec == key:
                 return state.set("The secret key must be the SECRET one, not the publishable key.")
@@ -435,7 +447,8 @@ class SharedListMixin:
             def done(_, err):
                 if err:
                     return state.set(f"Not saved: {err}")
-                self.shared_cfg.save_service(url, key)
+                if not built_in:
+                    self.shared_cfg.save_service(url, key)
                 if sec:
                     self.shared_cfg.save_admin_key(sec)
                 state.set("Saved." + (" Owner tools are ON on this PC." if self.shared_cfg.admin_key() else ""))
