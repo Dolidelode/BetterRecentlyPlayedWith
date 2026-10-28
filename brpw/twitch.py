@@ -24,6 +24,7 @@ STATUS_MAX_AGE = 10 * 60      # a Twitch status older than this is no longer sho
 CONSOLE_URL = "https://dev.twitch.tv/console/apps"
 SOT_GAME = "Sea of Thieves"   # Twitch category name; its ID is looked up once per run
 GAME_PAGES = 10               # at most 1000 live streams per refresh (10 requests)
+NAMES_EVERY = 24 * 3600       # how often saved channels are looked up by ID to pick up renamed channels
 
 _RESERVED = {"directory", "videos", "settings", "downloads", "jobs", "turbo", "p", "search", "friends", "subscriptions",
              "inventory", "drops", "wallet", "moderator", "popout", "embed", "u", "login", "signup"}
@@ -153,6 +154,15 @@ class TwitchClient:
                                                           str(u.get("display_name") or u["login"]))
         return out
 
+    def users_by_id(self, ids: List[str]) -> Dict[str, TwitchUser]:
+        """id -> user (current login and display name) for the IDs that still exist (100 per request)."""
+        out: Dict[str, TwitchUser] = {}
+        ids = sorted(set(ids))
+        for i in range(0, len(ids), CHUNK):
+            for u in self._get("users", [("id", x) for x in ids[i:i + CHUNK]]).get("data") or []:
+                out[str(u["id"])] = TwitchUser(str(u["id"]), str(u["login"]), str(u.get("display_name") or u["login"]))
+        return out
+
     def suggest(self, players: List[Tuple[int, str]]) -> List[dict]:
         """Possible Twitch channels for (account_id, gamertag) pairs, found only by NAME. Not confirmed identities:
         the caller must present them as guesses. Live status comes from Twitch itself."""
@@ -226,10 +236,15 @@ class TwitchChecker:
         self.db, self.client, self.now = db, client, now
 
     def check_accounts(self, account_ids: Optional[List[int]] = None) -> Dict[int, dict]:
+        if account_ids is None:
+            self.refresh_names()
         links = self.db.twitch_links(account_ids)
         if not links:
             return {}
         live = self.client.streams([l["twitch_id"] for l in links])
+        renamed = {i: (s["login"], None) for i, s in live.items() if s["login"]}
+        if renamed and self.db.update_twitch_names(renamed):      # a live channel shows its current login
+            links = self.db.twitch_links(account_ids)
         t = int(self.now())
         rows, out = [], {}
         for l in links:
@@ -241,3 +256,14 @@ class TwitchChecker:
                                         "started": s["started"]} if s else {})}
         self.db.store_twitch_status(rows)
         return out
+
+    def refresh_names(self, force: bool = False) -> int:
+        """Links are kept by Twitch channel ID, so a renamed channel stays linked; this picks up its new name (used
+        for the Twitch column and the twitch.tv/<name> links). At most once a day. Returns the number of changes."""
+        last = int(self.db.get_setting("twitch_names_checked", "0") or 0)
+        if not force and self.now() - last < NAMES_EVERY:
+            return 0
+        ids = [l["twitch_id"] for l in self.db.twitch_links()]
+        users = self.client.users_by_id(ids) if ids else {}
+        self.db.set_setting("twitch_names_checked", str(int(self.now())))
+        return self.db.update_twitch_names({i: (u.login, u.display_name) for i, u in users.items()})

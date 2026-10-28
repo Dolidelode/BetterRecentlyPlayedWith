@@ -69,6 +69,9 @@ can find them; that is fine, because the database only lets that key read the li
   same link, or different channels were suggested for one player. Senders with more rejected than approved
   suggestions are shown in red. **Check Twitch** asks Twitch (with your Twitch setup) whether each channel still
   exists under that name. Then **Approve**, **Reject** or **Block sender...**.
+* Links are kept by **Xbox XUID** and **Twitch channel ID**, so a renamed gamertag or Twitch channel stays linked.
+  With Twitch set up, the app looks up the current Twitch names once a day. On the owner's PC, **Publish my links**
+  also counts master entries whose gamertag or Twitch name changed and publishes the current names.
 * **Remove from master list** (owner, right-click a player) removes a wrong entry for everyone on their next download.
 * Users' apps download the list at start and every 6 hours (can be turned off). A user who removes a ◆ link keeps it
   removed, and their own links always win over the master list.

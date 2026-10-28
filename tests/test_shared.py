@@ -138,6 +138,25 @@ def test_links_to_share_only_own_new_links_once(db):
     assert db.links_to_share() == [] and len(db.links_to_share(include_sent=True)) == 1
 
 
+def test_master_list_follows_renamed_players_and_channels(db):
+    i = ids(db)
+    db.link_twitch(i["Mine"], "40", "my_pick", "My_Pick")
+    db.replace_shared([entry("2535400000000004", "Mine", "40", "my_pick"),
+                       entry("2535400000000001", "Salty Pirate", "10", "salty")])
+    assert db.master_corrections() == []
+    db.merge_players([Player("Mine Renamed", "2535400000000004"),                # Xbox rename: same XUID
+                      Player("Salty Pirate", "2535400000000001")], "openxbl", True, now=200)
+    assert {l["account_id"]: l["twitch_id"] for l in db.twitch_links()} == {i["Mine"]: "40", i["Salty Pirate"]: "10"}
+    db.update_twitch_names({"10": ("salty_new", "Salty_New")})                   # Twitch rename: same channel ID
+    fixes = {r["xuid"]: (r["gamertag"], r["twitch_login"]) for r in db.master_corrections()}
+    assert fixes == {"2535400000000004": ("Mine Renamed", "my_pick"), "2535400000000001": ("Salty Pirate", "salty_new")}
+    assert db.links_to_share(include_sent=True) == []                            # renames are not new links
+    db.replace_shared([entry("2535400000000004", "Mine Renamed", "40", "my_pick"),   # published, downloaded again
+                       entry("2535400000000001", "Salty Pirate", "10", "salty_new")])
+    assert db.master_corrections() == []
+    assert [l["login"] for l in db.twitch_links([i["Salty Pirate"]])] == ["salty_new"]
+
+
 def test_public_key_can_only_read_master_and_suggest():
     fake = FakeSupabase()
     pub, owner = SharedClient("https://x.supabase.co", PUB, http=fake), SharedClient("https://x.supabase.co/", SECRET, http=fake)

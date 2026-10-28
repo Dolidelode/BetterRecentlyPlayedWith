@@ -525,6 +525,35 @@ class Database:
             self.conn.executemany("INSERT OR REPLACE INTO shared_sent(xuid,twitch_id,sent_at) VALUES(?,?,?)",
                                   [(r["xuid"], r["twitch_id"], now) for r in rows])
 
+    def update_twitch_names(self, names: Dict[str, tuple]) -> int:
+        """twitch_id -> (login, display name or None) after a Twitch channel was renamed. The link itself (the
+        channel ID) never changes. Returns the number of links that changed."""
+        n = 0
+        with self.lock, self.conn:
+            for tid, (login, display) in names.items():
+                if display is None:                    # only the login is known: keep a matching display name
+                    n += self.conn.execute(
+                        "UPDATE twitch_links SET login=?, display_name=CASE WHEN lower(display_name)=? THEN "
+                        "display_name ELSE ? END WHERE twitch_id=? AND login<>?",
+                        (login, login.lower(), login, tid, login)).rowcount
+                else:
+                    n += self.conn.execute(
+                        "UPDATE twitch_links SET login=?, display_name=? WHERE twitch_id=? "
+                        "AND (login<>? OR display_name<>?)", (login, display, tid, login, display)).rowcount
+        return n
+
+    def master_corrections(self) -> List[dict]:
+        """Master-list entries (same player, same channel) whose gamertag or Twitch name is outdated here: the player
+        or the channel was renamed. For the list owner, to publish the current names."""
+        with self.lock:
+            rows = self.conn.execute(
+                """SELECT a.xuid, a.gamertag, l.twitch_id, l.login AS twitch_login, l.display_name AS twitch_name
+                   FROM twitch_links l JOIN accounts a ON a.id=l.account_id
+                   JOIN shared_links s ON s.xuid=a.xuid AND s.twitch_id=l.twitch_id
+                   WHERE s.gamertag<>a.gamertag OR s.login<>l.login OR s.display_name<>l.display_name
+                   ORDER BY a.gamertag_key""").fetchall()
+        return [dict(r) for r in rows]
+
     def shared_by_twitch(self) -> Dict[str, str]:
         """Twitch channel ID -> gamertag from the master list, also for players not in this history. Skips links the
         user removed and players they marked 'never link'."""

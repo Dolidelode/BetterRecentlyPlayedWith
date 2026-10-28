@@ -57,13 +57,13 @@ def fake(users=None, live=None, calls=None, token_error=None, stream_errors=None
             if "login" in q:
                 hits = [(users[l.lower()], l.lower()) for l in q["login"] if l.lower() in users]
             else:
-                hits = [((i, d), d.lower()) for (i, d) in users.values() if i == q["id"][0]]
+                hits = [((i, d), d.lower()) for (i, d) in users.values() if i in q["id"]]
             return {"data": [{"id": h[0][0], "login": h[1], "display_name": h[0][1]} for h in hits]}
         if u.path.endswith("/streams"):
             if stream_errors:
                 raise stream_errors.pop(0)
             ids = q["user_id"]
-            return {"data": [{"user_id": i, "user_login": "x", "type": "live", "viewer_count": live[i]["viewers"],
+            return {"data": [{"user_id": i, "user_login": live[i].get("login", ""), "type": "live", "viewer_count": live[i]["viewers"],
                               "game_name": live[i]["game"], "title": live[i]["title"],
                               "started_at": "2026-10-26T18:59:15Z"} for i in ids if i in live]}
         raise AssertionError(url)
@@ -201,6 +201,30 @@ def test_checker_error_keeps_old_status(db):
     with pytest.raises(ProviderError):
         TwitchChecker(db, bad).check_accounts()
     assert {r["gamertag"]: r["twitch_live"] for r in db.list_accounts()}["Live"] == 1   # untouched by the failure
+
+
+def test_renamed_twitch_channel_stays_linked_and_gets_its_new_name(db):
+    ids = seed_links(db)
+    clock = Clock(10_000_000)
+    calls = []
+    cl = TwitchClient(Mem(), http=fake({"streamer_2": ("100200300", "Streamer_2"), "quiet_one": ("777", "Quiet_One")},
+                                       calls=calls), now=clock)
+    ck = TwitchChecker(db, cl, now=clock)
+    ck.check_accounts()                                                            # daily lookup by channel ID
+    rows = {r["gamertag"]: r for r in db.list_accounts()}
+    assert rows["Live"]["twitch_id"] == "100200300" and rows["Live"]["twitch_name"] == "Streamer_2"
+    assert [l["login"] for l in db.twitch_links([ids["Live"]])] == ["streamer_2"]
+    n = sum(1 for u in calls if "/users" in u)
+    clock.t += 3600
+    ck.check_accounts()
+    assert sum(1 for u in calls if "/users" in u) == n                             # not again within a day
+    cl.http = fake(live={"100200300": {"title": "t", "game": "g", "viewers": 1, "login": "streamer_3"}})
+    ck.check_accounts()                                                            # a live stream shows the new login
+    assert [(l["login"], l["display_name"]) for l in db.twitch_links([ids["Live"]])] == [("streamer_3", "streamer_3")]
+    cl.http = fake({})                                                             # channel gone: link is kept
+    clock.t += 2 * 24 * 3600
+    ck.check_accounts()
+    assert [l["twitch_id"] for l in db.twitch_links([ids["Live"]])] == ["100200300"]
 
 
 def test_link_unlink_relink_and_cascade(db):

@@ -167,7 +167,7 @@ class SharedListMixin:
         for w in (win.owner_lbl, win.review_btn, win.publish_btn, win.setup_btn):
             w.pack_forget()
         if self.is_list_owner():
-            mine = self.db.links_to_share(include_sent=True)
+            mine = self.db.links_to_share(include_sent=True) + self.db.master_corrections()
             win.publish_btn.configure(text=f"Publish my links ({len(mine)})", state="normal" if mine else "disabled")
             for w in (win.owner_lbl, win.review_btn, win.publish_btn):
                 w.pack(side="left", padx=4)
@@ -197,11 +197,14 @@ class SharedListMixin:
     # ---- owner tools
     def publish_links(self):
         client = self._shared_client(admin=True)
-        rows = self.db.links_to_share(include_sent=True)
+        new, renamed = self.db.links_to_share(include_sent=True), self.db.master_corrections()
+        rows = new + renamed
         if client is None or not rows:
             return
-        if not messagebox.askyesno("Publish", f"Add or replace {len(rows)} of your own link(s) in the master list?",
-                                   parent=getattr(self, "_shared_win", None) or self.root):
+        if not messagebox.askyesno("Publish", (
+                f"Add {len(new)} of your own link(s) to the master list"
+                + (f" and update {len(renamed)} renamed player(s) / channel(s)" if renamed else "") + "?"),
+                parent=getattr(self, "_shared_win", None) or self.root):
             return
 
         def done(n, err):
