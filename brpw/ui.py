@@ -1,5 +1,6 @@
 """Tkinter UI. All network/DB-heavy work runs in worker threads; results return via a queue."""
 import queue
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -109,6 +110,8 @@ class App(SharedListMixin):
         self._schedule_shared(10_000)
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
+        updater.cleanup(updater.running_exe())                 # the old program file of a finished update
+        self.root.after(30_000, lambda: updater.cleanup(updater.running_exe()))   # the old app may still be closing
         if db.get_setting("auto_update_check", "1") == "1":
             threading.Thread(target=self._update_check, args=(False,), daemon=True).start()
 
@@ -1454,9 +1457,7 @@ class App(SharedListMixin):
                     if err and manual:
                         messagebox.showwarning("Updates", err)
                     elif info:
-                        if messagebox.askyesno("Update available", f"Version {info.version} is available "
-                                               f"(you have {__version__}).\n\n{info.notes[:800]}\n\nOpen the release page?"):
-                            webbrowser.open(info.url)
+                        self._offer_update(info)
                     elif manual:
                         messagebox.showinfo("Updates", "You are up to date.")
         except queue.Empty:
@@ -1493,6 +1494,58 @@ class App(SharedListMixin):
         if not self.paused and self.xkey.get():
             self.live_check_now()
         self._schedule_live()
+
+    def _offer_update(self, info):
+        text = f"Version {info.version} is available (you have {__version__}).\n\n{info.notes[:800]}\n\n"
+        if not (info.exe_url and updater.running_exe()):        # running from source, or no program file
+            if messagebox.askyesno("Update available", text + "Open the release page?"):
+                webbrowser.open(info.url)
+            return
+        answer = messagebox.askyesnocancel("Update available", text + (
+            "Yes: update now (downloads the new version from GitHub, checks it and restarts the app)\n"
+            "No: open the release page\nCancel: later"))
+        if answer:
+            self.update_now(info)
+        elif answer is False:
+            webbrowser.open(info.url)
+
+    def update_now(self, info):
+        exe = updater.running_exe()
+        if exe is None or "update" in self.busy:
+            return
+        self.set_status(f"Downloading version {info.version}...")
+        self._set_busy("update", True)
+
+        def work():
+            try:
+                updater.install(updater.download(info, exe), exe)
+                err = None
+            except updater.UpdateError as e:
+                err = str(e)
+            except Exception as e:
+                err = f"Unexpected error: {e}"
+
+            def done():
+                self._set_busy("update", False)
+                if err:
+                    self.set_status(f"Update failed: {err}", error=True)
+                    if messagebox.askyesno("Update failed", f"{err}\n\nOpen the release page instead?"):
+                        webbrowser.open(info.url)
+                    return
+                self.set_status(f"Version {info.version} is installed; it is used from the next start of the app.")
+                if messagebox.askyesno("Update installed", f"Version {info.version} is installed. Restart now?"):
+                    self.restart(exe)
+            self.q.put(("call", done))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def restart(self, exe):
+        try:
+            subprocess.Popen([str(exe)], env=updater.restart_env(), close_fds=True,
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        except OSError as e:
+            return self.set_status(f"Could not restart ({e}); start the app again yourself.", error=True)
+        self.on_close()
 
     def _update_check(self, manual):
         try:

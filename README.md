@@ -17,7 +17,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | **Twitch icon** | Experimental. A Twitch icon appears on a player's row only while **Xbox itself** reports an active Twitch broadcast for that account. It checks the 20 most recent players automatically (one OpenXBL request each, max 30 per hour). No channel link or stream title is available, so none is shown. Not yet seen on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
 | **Twitch (optional)** | Save a player's Twitch channel once (copy the name from SOTREP); the app verifies it with Twitch to an exact channel ID and then checks live status for all saved channels in one request every 2 minutes: title, game, viewers, watch link. Needs your own free Twitch application keys, entered once and stored only on your PC. Tested against the real Twitch API |
 | SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
-| Update check | Notifies you and opens the GitHub release page. No automatic install |
+| Updates | Notifies you of a new release. **Update now** downloads it from GitHub, checks it against the release's SHA-256 checksum, swaps the program file and restarts. Nothing installs without your click |
 
 ## Using it
 1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
@@ -53,7 +53,7 @@ A small icon on a row means Xbox reports that player as broadcasting right now (
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
 
 ## Privacy
-Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` (update check) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
+Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` and `github.com` (update check, and the download when you click Update now) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
 
 ## Development
 ```

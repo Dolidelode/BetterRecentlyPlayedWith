@@ -285,6 +285,40 @@ def test_parse_release():
         updater.parse_release({**good, "tag_name": "garbage"}, "0.1.0")
 
 
+def test_in_app_update_download_verify_install(tmp_path):
+    import hashlib
+    from brpw import REPO
+    base = f"https://github.com/{REPO}/releases/download/v9.0.0/"
+    good = {"tag_name": "v9.0.0", "html_url": f"https://github.com/{REPO}/releases/tag/v9.0.0", "assets": [
+        {"name": "BetterRecentlyPlayedWith.exe", "browser_download_url": base + "BetterRecentlyPlayedWith.exe"},
+        {"name": "SHA256SUMS.txt", "browser_download_url": base + "SHA256SUMS.txt"},
+        {"name": "other.zip", "browser_download_url": base + "other.zip"}]}
+    info = updater.parse_release(good, "0.1.0")
+    assert info.exe_url.endswith(".exe") and info.sums_url.endswith("SUMS.txt")
+    evil = {**good, "assets": [{"name": "BetterRecentlyPlayedWith.exe", "browser_download_url": "https://evil.example/x.exe"}]}
+    assert updater.parse_release(evil, "0.1.0").exe_url == ""               # only files from the official repository
+    new_exe = b"MZ new program"
+    sums = f"{hashlib.sha256(new_exe).hexdigest().upper()}  BetterRecentlyPlayedWith.exe\n".encode()
+    files = {info.exe_url: new_exe, info.sums_url: sums}
+    exe = tmp_path / "BetterRecentlyPlayedWith.exe"
+    exe.write_bytes(b"MZ old program")
+    new = updater.download(info, exe, fetch=lambda u, limit: files[u])
+    updater.install(new, exe)
+    assert exe.read_bytes() == new_exe and (tmp_path / "BetterRecentlyPlayedWith.exe.old").read_bytes() == b"MZ old program"
+    updater.cleanup(exe)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["BetterRecentlyPlayedWith.exe"]
+    for bad in ({**files, info.exe_url: b"MZ tampered"},                     # checksum differs
+                {**files, info.sums_url: b"nothing useful"},                   # no checksum for the exe
+                {info.exe_url: b"not MZ", info.sums_url: f"{hashlib.sha256(b'not MZ').hexdigest()} *BetterRecentlyPlayedWith.exe".encode()}):
+        with pytest.raises(updater.UpdateError):
+            updater.download(info, exe, fetch=lambda u, limit, f=bad: f[u])
+    assert exe.read_bytes() == new_exe and not (tmp_path / "BetterRecentlyPlayedWith.exe.new").exists()
+    with pytest.raises(updater.UpdateError):
+        updater.download(updater.UpdateInfo("9.0.0", "", info.url), exe)          # release without program file
+    env = updater.restart_env()
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1" and not any(k.startswith("_MEI") for k in env)
+
+
 # ---- app startup / shutdown
 def test_app_startup_shutdown(tmp_path, monkeypatch):
     import time
