@@ -525,6 +525,17 @@ class Database:
             self.conn.executemany("INSERT OR REPLACE INTO shared_sent(xuid,twitch_id,sent_at) VALUES(?,?,?)",
                                   [(r["xuid"], r["twitch_id"], now) for r in rows])
 
+    def shared_by_twitch(self) -> Dict[str, str]:
+        """Twitch channel ID -> gamertag from the master list, also for players not in this history. Skips links the
+        user removed and players they marked 'never link'."""
+        with self.lock:
+            rows = self.conn.execute(
+                """SELECT s.twitch_id, s.gamertag FROM shared_links s
+                   WHERE NOT EXISTS(SELECT 1 FROM shared_hidden h WHERE h.xuid=s.xuid AND h.twitch_id=s.twitch_id)
+                     AND NOT EXISTS(SELECT 1 FROM twitch_never n JOIN accounts a ON a.id=n.account_id
+                                    WHERE a.xuid=s.xuid)""").fetchall()
+        return {r["twitch_id"]: r["gamertag"] for r in rows}
+
     def shared_entry(self, xuids: List[str]) -> Dict[str, sqlite3.Row]:
         if not xuids:
             return {}

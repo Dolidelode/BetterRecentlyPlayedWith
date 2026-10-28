@@ -873,6 +873,7 @@ class App(SharedListMixin):
         for a in recent:
             by_tag.setdefault(a["gamertag"], a)
         linked = {l["twitch_id"]: l["account_id"] for l in self.db.twitch_links()}
+        master = self.db.shared_by_twitch()                    # also players this PC has never met
         tag_of = {a["id"]: a["gamertag"] for a in accounts}
         same = {}
         for a in recent:
@@ -883,6 +884,8 @@ class App(SharedListMixin):
         def match(s):
             if s["id"] in linked:
                 return "linked: " + tag_of.get(linked[s["id"]], "?")
+            if s["id"] in master:
+                return "linked: " + master[s["id"]] + SHARED_MARK
             return "same name: " + same[s["login"].lower()] if s["login"].lower() in same else ""
 
         ttk.Label(win, style="Hint.TLabel", wraplength=860, justify="left", text=(
@@ -991,7 +994,9 @@ class App(SharedListMixin):
 
         def on_pick(_=None):
             s = rows.get((tv.selection() or [None])[0])
-            if s and s["login"].lower() in same and s["id"] not in linked:
+            if s and s["id"] in master and s["id"] not in linked:
+                pvar.set(master[s["id"]])
+            elif s and s["login"].lower() in same and s["id"] not in linked:
                 pvar.set(same[s["login"].lower()])
         tv.bind("<<TreeviewSelect>>", on_pick)
 

@@ -121,6 +121,7 @@ def test_master_list_fills_history_but_never_overrides_the_user(db):
     assert not db.twitch_links([i["Salty Pirate"]])
     db.merge_players([Player("Never Met", "2535400000099999")], "openxbl", True, now=200)
     assert db.apply_shared() == 1                                          # met later: gets the channel then
+    assert db.shared_by_twitch() == {"41": "Mine", "50": "Never Met"}      # not removed (Salty) or never (Cheaty)
     db.replace_shared([])                                                  # gone from the master list
     assert [l["account_id"] for l in db.twitch_links()] == [i["Mine"]]
 
@@ -225,9 +226,19 @@ def test_shared_ui_send_review_approve(tmp_path, monkeypatch):
     win.destroy()
     app.shared_cfg.bundled.write_text('{"url": "https://x.supabase.co", "key": "%s"}' % PUB)   # a normal user's copy
     fake.master["2535400000000001"] = entry("2535400000000001", "Salty Pirate", "10", "salty")
+    fake.master["2535400000099999"] = entry("2535400000099999", "Never Met", "50", "never_met")
     app.shared_sync(quiet=False)
     wait("shared")
     assert app.tree.set(str(i["Salty Pirate"]), "twitch") == "Salty" + ui.SHARED_MARK
+    # Live SoT streams: master-list players count as linked, also ones this PC has never met
+    app._on_sot_streams([{"id": "50", "login": "never_met", "name": "Never_Met", "title": "t", "viewers": 3,
+                          "started": None, "language": "en", "tags": []}], None)
+    tv = app.sot_win.streams_tv
+    assert tv.item(tv.get_children()[0], "values")[0] == "linked: Never Met" + ui.SHARED_MARK
+    tv.selection_set(tv.get_children()[0])
+    root.update()
+    assert app.sot_win.player_var.get() == "Never Met"
+    app.sot_win.destroy()
     win = app.shared_dialog()
     assert "Send my links (1)" == win.send_btn["text"] and not win.review_btn.winfo_ismapped()
     assert not win.setup_btn.winfo_manager()                                 # Owner setup hidden from users
