@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 MAX_BACKUPS = 5
 
@@ -136,7 +136,18 @@ def _m10(c: sqlite3.Connection) -> None:
         PRIMARY KEY(account_id, twitch_id, session))""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10]  # index i migrates user_version i -> i+1
+def _m11(c: sqlite3.Connection) -> None:
+    # Shared list (see shared.py): the downloaded master list, master links this user removed (not re-added),
+    # and own links already sent as suggestions.
+    c.execute("""CREATE TABLE shared_links(
+        xuid TEXT PRIMARY KEY, gamertag TEXT NOT NULL, twitch_id TEXT NOT NULL, login TEXT NOT NULL,
+        display_name TEXT NOT NULL)""")
+    c.execute("CREATE TABLE shared_hidden(xuid TEXT NOT NULL, twitch_id TEXT NOT NULL, PRIMARY KEY(xuid, twitch_id))")
+    c.execute("""CREATE TABLE shared_sent(xuid TEXT NOT NULL, twitch_id TEXT NOT NULL, sent_at INTEGER NOT NULL,
+        PRIMARY KEY(xuid, twitch_id))""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10, _m11]  # index i migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -421,7 +432,13 @@ class Database:
             self.conn.execute("DELETE FROM twitch_status WHERE account_id=?", (account_id,))   # old status is stale now
 
     def unlink_twitch(self, account_ids: List[int]) -> None:
+        """Remove links. A removed link that came from the shared list is remembered, so syncing won't re-add it."""
         with self.lock, self.conn:
+            for a in account_ids:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO shared_hidden(xuid, twitch_id) SELECT ac.xuid, l.twitch_id "
+                    "FROM twitch_links l JOIN accounts ac ON ac.id=l.account_id "
+                    "WHERE l.account_id=? AND l.source='shared' AND ac.xuid IS NOT NULL", (a,))
             self.conn.executemany("DELETE FROM twitch_links WHERE account_id=?", [(a,) for a in account_ids])
             self.conn.executemany("DELETE FROM twitch_status WHERE account_id=?", [(a,) for a in account_ids])
 
@@ -453,6 +470,68 @@ class Database:
         with self.lock:
             return {r[0]: r[1] for r in self.conn.execute(
                 f"SELECT account_id, reason FROM twitch_never WHERE account_id IN ({marks})", list(account_ids))}
+
+    # ---- shared list (see shared.py) ----
+    def replace_shared(self, rows: List[dict]) -> None:
+        """Store a freshly downloaded master list and apply it."""
+        with self.lock, self.conn:
+            self.conn.execute("DELETE FROM shared_links")
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO shared_links(xuid,gamertag,twitch_id,login,display_name) VALUES(?,?,?,?,?)",
+                [(r["xuid"], r["gamertag"], r["twitch_id"], r["twitch_login"], r.get("twitch_name") or r["twitch_login"])
+                 for r in rows])
+        self.apply_shared()
+
+    def apply_shared(self) -> int:
+        """Give players in this history their master-list channel, unless the user linked one themselves, marked them
+        'never link' or removed that shared link. Shared links that left the master list (or changed) are updated.
+        Returns the number of players that got a new shared link."""
+        now = int(time.time())
+        with self.lock, self.conn:
+            self.conn.execute(
+                """DELETE FROM twitch_links WHERE source='shared' AND NOT EXISTS(
+                     SELECT 1 FROM shared_links s JOIN accounts a ON a.xuid=s.xuid
+                     WHERE a.id=twitch_links.account_id AND s.twitch_id=twitch_links.twitch_id)""")
+            cur = self.conn.execute(
+                """INSERT INTO twitch_links(account_id,twitch_id,login,display_name,linked_at,source)
+                   SELECT a.id, s.twitch_id, s.login, s.display_name, ?, 'shared'
+                   FROM shared_links s JOIN accounts a ON a.xuid=s.xuid
+                   WHERE NOT EXISTS(SELECT 1 FROM twitch_links l WHERE l.account_id=a.id)
+                     AND NOT EXISTS(SELECT 1 FROM twitch_never n WHERE n.account_id=a.id)
+                     AND NOT EXISTS(SELECT 1 FROM shared_hidden h WHERE h.xuid=s.xuid AND h.twitch_id=s.twitch_id)""",
+                (now,))
+            return cur.rowcount
+
+    def shared_count(self) -> int:
+        with self.lock:
+            return self.conn.execute("SELECT COUNT(*) FROM shared_links").fetchone()[0]
+
+    def links_to_share(self, include_sent: bool = False) -> List[dict]:
+        """Own hand-made links (with an XUID) that the master list does not have yet."""
+        with self.lock:
+            rows = self.conn.execute(
+                f"""SELECT a.xuid, a.gamertag, l.twitch_id, l.login AS twitch_login, l.display_name AS twitch_name
+                   FROM twitch_links l JOIN accounts a ON a.id=l.account_id
+                   WHERE l.source='manual' AND a.xuid IS NOT NULL
+                     AND NOT EXISTS(SELECT 1 FROM shared_links s WHERE s.xuid=a.xuid AND s.twitch_id=l.twitch_id)
+                     {"" if include_sent else
+                      "AND NOT EXISTS(SELECT 1 FROM shared_sent x WHERE x.xuid=a.xuid AND x.twitch_id=l.twitch_id)"}
+                   ORDER BY a.gamertag_key""").fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_sent(self, rows: List[dict]) -> None:
+        now = int(time.time())
+        with self.lock, self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO shared_sent(xuid,twitch_id,sent_at) VALUES(?,?,?)",
+                                  [(r["xuid"], r["twitch_id"], now) for r in rows])
+
+    def shared_entry(self, xuids: List[str]) -> Dict[str, sqlite3.Row]:
+        if not xuids:
+            return {}
+        marks = ",".join("?" * len(xuids))
+        with self.lock:
+            return {r["xuid"]: r for r in self.conn.execute(
+                f"SELECT * FROM shared_links WHERE xuid IN ({marks})", list(xuids))}
 
     def store_twitch_status(self, rows) -> None:
         with self.lock, self.conn:

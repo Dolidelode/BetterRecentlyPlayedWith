@@ -41,6 +41,9 @@ Xbox only reports broadcasts that go through Xbox, so it misses most PC streamer
 3. The **Twitch** column shows `LIVE <viewers> - <name>` while the channel is live (with the live icon), or just the name. **Open Twitch** opens the channel; **Check live** also shows game, title and viewers for the selected players.
 Checks run by themselves every 2 minutes (100 channels per Twitch request) and stay silent unless something fails. Without keys the rest of the app works as before.
 
+## Shared Twitch list (optional)
+One master list of players and their Twitch channels, kept by the list owner and downloaded by every copy of the app. Players in your history get their channel from it automatically (marked ◆); your own links always win. **Shared list... → Send my links** sends the links you made yourself to the owner, who approves or rejects them inside the app before anyone else gets them. What is sent: gamertag, XUID, Twitch channel, an optional name and a random ID of your copy of the app. Owner setup and how it is protected: [docs/SHARED_LIST.md](docs/SHARED_LIST.md).
+
 ## Twitch icon
 Select players and press **Check live** to ask Xbox about them right now (up to 20 per click, 10 per OpenXBL request); a results window shows what Xbox says for each, including players who are offline or broadcasting somewhere other than Twitch.
 
@@ -50,7 +53,7 @@ A small icon on a row means Xbox reports that player as broadcasting right now (
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
 
 ## Privacy
-Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` (update check) and opens `sotrep.com` links in your browser. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
+Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` (update check) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
 
 ## Development
 ```

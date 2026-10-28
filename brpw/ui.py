@@ -12,6 +12,8 @@ from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         find_gamertag, lookup_gamertag)
 from .game import game_running
+from .shared import SharedConfig, http_rest
+from .shared_ui import SHARED_MARK, SharedListMixin
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
@@ -69,7 +71,7 @@ class Spinner(tk.Canvas):
         self.job = self.after(55, self._tick)
 
 
-class App:
+class App(SharedListMixin):
     def __init__(self, root: tk.Tk, db: Database):
         self.root, self.db = root, db
         self.sync = SyncService(db)
@@ -93,6 +95,10 @@ class App:
         self.tcheck = TwitchChecker(db, self.tclient)
         self.twitch_after_id = None
         self.twitch_busy = False
+        self.shared_cfg = SharedConfig(data_dir())
+        self.shared_http = http_rest       # replaced in tests
+        self.shared_after_id = None
+        self.shared_busy = False
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.reload()
@@ -100,6 +106,7 @@ class App:
         self._schedule()
         self._schedule_live(15_000)
         self._schedule_twitch(20_000)
+        self._schedule_shared(10_000)
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         if db.get_setting("auto_update_check", "1") == "1":
@@ -206,6 +213,7 @@ class App:
         ttk.Button(acct, text="Add account...", command=self.set_key).pack(side="left")
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
         ttk.Button(acct, text="Twitch setup...", command=self.twitch_setup_dialog).pack(side="right")
+        ttk.Button(acct, text="Shared list...", command=self.shared_dialog).pack(side="right", padx=4)
         ttk.Button(acct, text="Live SoT streams", command=self.sot_streams).pack(side="right", padx=4)
         self._refresh_accounts()
 
@@ -322,7 +330,8 @@ class App:
             if a["twitch_never"] is not None:
                 tw_text = "⛔ " + (a["twitch_never"] or "never link")
             else:
-                tw_text = (a["twitch_name"] or "") + (" ⚙" if a["twitch_source"] == "auto" else "")
+                tw_text = (a["twitch_name"] or "") + {"auto": " ⚙", "shared": SHARED_MARK}.get(
+                    a["twitch_source"], "")
                 if tw_live:
                     v = a["twitch_viewers"]
                     tw_text = (f"● {v}  " if v is not None else "●  ") + tw_text
@@ -382,7 +391,8 @@ class App:
             ("Link Twitch channel...", self.link_twitch_selected, one),
             ("Guess Twitch", self.guess_twitch, True),
             ("Allow linking again" if all_never else "Never link...", self.never_link_selected, True),
-        ]
+        ] + ([(None, None, True), ("Remove from master list", self.remove_from_master, True)]
+             if self.is_list_owner() else [])
 
     HIDEABLE = ("xuid", "tags", "twitch", "last_seen", "origin", "current")
 
@@ -1390,6 +1400,7 @@ class App:
         if not imported:
             self._set_busy("sync", False)
         if out.ok:
+            self.db.apply_shared()                   # newly met players may be in the master list
             who = "" if imported or not self.xkey.active() else f" as {self.xkey.active()}"
             self.set_status(("Imported: " if imported else f"Synced{who}: ") + out.message)
         else:
@@ -1493,6 +1504,9 @@ class App:
         if self.twitch_after_id:
             self.root.after_cancel(self.twitch_after_id)
             self.twitch_after_id = None
+        if self.shared_after_id:
+            self.root.after_cancel(self.shared_after_id)
+            self.shared_after_id = None
         if self.after_id:
             self.root.after_cancel(self.after_id)
             self.after_id = None

@@ -19,3 +19,4 @@ backups/
 export*.csv
 export*.json
 twitch*.json
+shared_*.json
