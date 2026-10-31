@@ -1,3 +1,3 @@
 __version__ = "0.2.5"
-REPO = "RafaelOudshoorn/BetterRecentlyPlayedWith"
+REPO = "Dolidelode/BetterRecentlyPlayedWith"
 APP_NAME = "BetterRecentlyPlayedWith"

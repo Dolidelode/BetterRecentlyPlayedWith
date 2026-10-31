@@ -20,7 +20,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | Updates | Notifies you of a new release. **Update now** downloads it from GitHub, checks it against the release's SHA-256 checksum, swaps the program file and restarts. Nothing installs without your click |
 
 ## Using it
-1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
+1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/Dolidelode/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
 2. **Import...** to paste gamertags, or **Add account...** for live sync (below).
 3. Double-click a player (or **Open SOTREP**). Select several rows and **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically), and **Encounters...** for a summary of the selected players (first/last seen, times seen, name changes, friend status, Xbox's "last online" when known) plus every recorded encounter.
 4. Leave it open: it refreshes every 60 s (changeable, minimum 30 s; **Pause** any time).
@@ -63,6 +63,6 @@ python run.py              # run from source
 ```
 CI (`.github/workflows/build.yml`) tests and builds on Windows; pushing a tag `vX.Y.Z` attaches the exe and a SHA-256 file to a release. The hash comes from the same place as the exe, so it detects corruption, not tampering; code signing is not set up yet.
 
-Publish: `git init && git add . && git commit -m "Initial version" && git branch -M main && git remote add origin https://github.com/RafaelOudshoorn/BetterRecentlyPlayedWith.git && git push -u origin main`
+Publish: `git init && git add . && git commit -m "Initial version" && git branch -M main && git remote add origin https://github.com/Dolidelode/BetterRecentlyPlayedWith.git && git push -u origin main`
 
 License: MIT (simple, permissive). Not affiliated with Microsoft, Xbox, Rare or SOTREP.
