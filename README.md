@@ -3,7 +3,7 @@
 A small Windows app that keeps a local history of your Xbox **Recently played with** players and opens
 their [SOTREP](https://www.sotrep.com/) page with one click. No server, no installer, no Python needed.
 
-> **Status: early (v0.2.5).** Read "What works and what doesn't" before relying on it.
+> **Status: early (v0.2.6).** Read "What works and what doesn't" before relying on it.
 
 ## What works and what doesn't
 | Feature | State |
