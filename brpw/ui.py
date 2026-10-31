@@ -233,6 +233,7 @@ class App(SharedListMixin):
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *a: self.reload())
         ttk.Entry(bar2, textvariable=self.search).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(bar2, text="Reset table", command=self.reset_table).pack(side="left", padx=(0, 4))
         ttk.Button(bar2, text="Import...", command=self.import_dialog).pack(side="left", padx=4)
         ttk.Button(bar2, text="Export...", command=self.export).pack(side="left")
 
@@ -243,8 +244,7 @@ class App(SharedListMixin):
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
         self.tree.column("#0", width=34, minwidth=34, stretch=False, anchor="center")  # Twitch icon, only when live
         self.tree.heading("#0", text="")
-        for c, w in (("gamertag", 170), ("xuid", 130), ("tags", 110), ("twitch", 190), ("last_seen", 115),
-                     ("origin", 55), ("current", 44)):
+        for c, w in self.COL_WIDTHS.items():
             self.tree.heading(c, command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=w, minwidth=30, anchor="center" if c == "current" else "w",
                              stretch=c not in ("origin", "current"))
@@ -306,6 +306,20 @@ class App(SharedListMixin):
         "origin": lambda a: a["source"],
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
     }
+
+    COL_WIDTHS = {"gamertag": 170, "xuid": 130, "tags": 110, "twitch": 190, "last_seen": 115, "origin": 55,
+                  "current": 44}
+
+    def reset_table(self):
+        """Back to the default view: Xbox list order, no search, all columns shown at their normal width."""
+        self.sort_col, self.sort_desc = "current", False
+        self.db.set_setting("hidden_columns", "")
+        self._apply_hidden_columns()
+        for c, w in self.COL_WIDTHS.items():
+            self.tree.column(c, width=w)
+        self._update_headings()
+        self.search.set("")                       # also reloads
+        self.reload(to_top=True)
 
     def sort_by(self, col):
         self.sort_desc = not self.sort_desc if col == self.sort_col else (col == "last_seen")
@@ -957,8 +971,8 @@ class App(SharedListMixin):
             lang, lo, hi = lang_label.get(lvar.get()), num(vmin), num(vmax)
             if sort["col"]:
                 order = sorted(streams, key=keys[sort["col"]], reverse=sort["desc"])
-            else:
-                order = sorted(streams, key=lambda s: (not match(s), -s["viewers"]))
+            else:                                      # default: most viewers first, linked or not
+                order = sorted(streams, key=lambda s: -s["viewers"])
             for s in order:
                 m, tags = match(s), ", ".join(s.get("tags") or [])
                 if f and not any(f in x.casefold() for x in (s["name"], s["title"], m, tags)):
@@ -1088,6 +1102,22 @@ class App(SharedListMixin):
         ttk.Button(bar, text="Find on SOTREP", command=find_on_sotrep).pack(side="left", padx=4)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
+
+        def reset():
+            """Back to the default view: no filters, most viewers first."""
+            fvar.set("")
+            lvar.set("All languages")
+            vmin.set("")
+            vmax.set("")
+            mine.set(False)
+            sort.update(col=None, desc=False)
+            for c, _, w in cols:
+                tv.column(c, width=w)
+            fill()
+            remember()
+            tv.yview_moveto(0)
+        ttk.Button(bar, text="Reset table", command=reset).pack(side="right", padx=4)
+        win.reset = reset
         win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
         win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
         win.find_on_sotrep = find_on_sotrep

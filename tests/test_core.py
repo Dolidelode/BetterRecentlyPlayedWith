@@ -512,7 +512,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.selection_set(str(by["New2"]))
     app.never_link_selected()                                         # pressing it again removes the mark
     assert app.tree.set(str(by["New2"]), "twitch") == ""
-    # "Live SoT streams": linked and same-name streams first, linking uses the exact Twitch ID of the stream
+    # "Live SoT streams": most viewers first (linked or not), linking uses the exact Twitch ID of the stream
     st = lambda i, login, v, lang="en", tags=(): {
         "id": i, "login": login, "name": login.title(), "title": "Sailing", "viewers": v, "started": _t.time() - 3700,
         "language": lang, "tags": list(tags)}
@@ -528,8 +528,9 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert btn.winfo_ismapped() and btn.winfo_rooty() + btn.winfo_height() <= sw.winfo_rooty() + sw.winfo_height()
     count = lambda: len(sw.streams_tv.get_children())
     vals = [sw.streams_tv.item(i, "values") for i in sw.streams_tv.get_children()]
-    assert vals[0][0] == "linked: Old" and vals[1][0] == "same name: Unlinked Pirate" and vals[2][1] == "Big_One"
-    assert vals[0][3] == "1h 01m" and vals[2][6] == "Hourglass"
+    assert [v[1] for v in vals] == ["Big_One", "Example_Streamer", "Unlinkedpirate", "Stranger"]
+    assert vals[1][0] == "linked: Old" and vals[2][0] == "same name: Unlinked Pirate"
+    assert vals[1][3] == "1h 01m" and vals[0][6] == "Hourglass"
     sw.filter_var.set("strang")
     assert count() == 1
     sw.filter_var.set("hourglass")                                     # search also looks at tags
@@ -558,10 +559,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     sw = app.sot_win
     assert sw.lang_var.get() == "en (2)" and count() == 2
     assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Unlinkedpirate"
-    app.sot_filters = {}
+    sw.mine.set(True)
+    sw.reset()                                                         # Reset table: no filters, most viewers first
+    assert count() == 4 and sw.lang_var.get() == "All languages" and not sw.mine.get()
+    assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Big_One"
     app._on_sot_streams(streams, None)
     sw = app.sot_win
-    sw.streams_tv.selection_set(sw.streams_tv.get_children()[1])
+    assert count() == 4                                                # the reset is remembered
+    sw.streams_tv.selection_set(sw.streams_tv.get_children()[2])
     root.update()
     assert sw.player_var.get() == "Unlinked Pirate"                    # same-name stream pre-fills the player
     sw.link()
@@ -607,6 +612,15 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert "xuid" not in app.tree["displaycolumns"]
     app.toggle_column("xuid")
     assert "xuid" in app.tree["displaycolumns"]
+    # Reset table: Xbox list order, no search, every column back at its normal width
+    app.toggle_column("tags")
+    app.sort_by("gamertag")
+    app.search.set("zzz-nothing")
+    app.tree.column("gamertag", width=400)
+    app.reset_table()
+    assert (app.sort_col, app.sort_desc, app.search.get()) == ("current", False, "")
+    assert "tags" in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == ""
+    assert app.tree.column("gamertag", "width") < 400 and app.tree.get_children()   # stretch columns fit the window
     real_refresh, refreshed, game = app.refresh_now, [], [False]
     app.refresh_now = lambda manual=True: refreshed.append(manual)
     app.game_check = lambda: game[0]
