@@ -103,7 +103,8 @@ def test_stream_log_window(tmp_path, monkeypatch):
     assert app.tv.set("1", "status") == "◆ Salty Pirate" and "3 channels" in app.counts.get()
     app.view.set("To do (new, not in master list)")
     app.tv.selection_set("3")
-    app.mark("checked")                                                        # already checked: off the to-do list
+    assert all(app.tv.bind(f"<Key-{k}>") for k in "csn")                     # C / S / N keys in the list
+    app.mark("checked")                                                        # checked: off the to-do list
     assert shown() == ["Other"]
     app.tv.selection_set("2")
     app.open_sotrep()
@@ -114,10 +115,20 @@ def test_stream_log_window(tmp_path, monkeypatch):
     app.add_to_master()                                                        # no exact Xbox match: nothing added
     settle()
     assert "2535400000000002" not in fake.master and "Close One" in app.msg.get()
-    app.gt_var.set("other guy")
+    app.gt_var.set("")
+    root.clipboard_clear()
+    root.clipboard_append("https://www.sotrep.com/x")                          # not a gamertag: ignored
+    app._clipboard_pickup()
+    assert app.gt_var.get() == ""
+    root.clipboard_clear()
+    root.clipboard_append(" other guy ")                                       # copied on SOTREP, back in the window
+    app._clipboard_pickup()
+    assert app.gt_var.get() == "other guy" and "Press Enter" in app.msg.get()
     app.add_to_master()                                                        # one step, no extra prompts
     settle()
     assert app.msg.get().startswith("Added: Other Guy") and app.gt_var.get() == ""
+    app._clipboard_pickup()                                                    # the same copied name is not used twice
+    assert app.gt_var.get() == ""
     assert lookups[-1] == ("openxbl-key", "other guy")
     assert fake.master["2535400000000002"]["twitch_id"] == "2" and fake.master["2535400000000002"]["twitch_login"] == "other"
     assert shown() == [] and {r["twitch_id"]: r["status"] for r in lg.channels()}["2"] == "linked"

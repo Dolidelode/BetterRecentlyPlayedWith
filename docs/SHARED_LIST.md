@@ -91,7 +91,9 @@ Twitch every 5 minutes (up to 10 requests per round) and stores everything in `s
 * **To do** = seen live, not in the master list, not handled yet. Double-click opens SOTREP's search for that channel.
 * Select a channel, type (or paste) the gamertag in the **Gamertag** box and press **Enter**: the exact XUID is looked
   up via your OpenXBL key and published with the secret key, and the next channel is selected. No extra prompts; the
-  result shows in the line below. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
+  result shows in the line below. Quicker: copy the gamertag on SOTREP and switch back; the empty box is filled from
+  the clipboard (only something that looks like a gamertag), so you only press Enter.
+* Keys in the list: **C** checked, **S** skip, **N** back to new, **Enter** opens SOTREP. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
 * "Keep the PC awake while logging" stops Windows from sleeping while the tool is open (the screen can still turn off).
 
 Build it with:

@@ -1,5 +1,6 @@
 """Window of the stream log (owner/dev tool). Start with `python streamlog.py` or BRPW-StreamLog.exe."""
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -21,6 +22,11 @@ VIEWS = {"To do (new, not in master list)": lambda r, m: r["status"] == "new" an
          "Linked here": lambda r, m: r["status"] == "linked",
          "Checked (nothing found yet)": lambda r, m: r["status"] == "checked",
          "Skipped": lambda r, m: r["status"] == "skip"}
+
+
+def looks_like_gamertag(text: str) -> bool:
+    """Xbox gamertags: letters, digits and single spaces, at most ~16 characters, optionally a #1234 suffix."""
+    return 0 < len(text) <= 21 and re.fullmatch(r"[^\W_](?:[^\W_]| (?! ))*(?:#\d{1,4})?", text) is not None
 
 
 def ago(t, now):
@@ -98,6 +104,10 @@ class StreamLogApp:
         self.tv.pack(side="left", fill="both", expand=True)
         self.tv.bind("<Double-1>", lambda e: self.open_sotrep())
         self.tv.bind("<Return>", lambda e: self.open_sotrep())
+        for key, status in (("c", "checked"), ("s", "skip"), ("n", "new")):     # quick marking from the table
+            self.tv.bind(f"<Key-{key}>", lambda e, st=status: self.mark(st))
+        self.last_clip = None
+        r.bind("<FocusIn>", lambda e: self._clipboard_pickup())               # back from SOTREP with a copied name
         acts = ttk.Frame(r)
         acts.pack(side="bottom", fill="x", padx=8, pady=(4, 8), before=box)   # buttons stay visible
         # one-step linking: select a channel, type (or paste) the gamertag, press Enter
@@ -111,7 +121,9 @@ class StreamLogApp:
                           ("Mark checked", lambda: self.mark("checked")), ("Skip", lambda: self.mark("skip")),
                           ("Back to new", lambda: self.mark("new"))):
             ttk.Button(acts, text=text, command=cmd).pack(side="left", padx=(0, 4))
-        self.msg = tk.StringVar(value="Double-click opens SOTREP. Then type the gamertag and press Enter.")
+        self.msg = tk.StringVar(value="Double-click opens SOTREP. Copy the gamertag there, come back and press Enter "
+                                      "(it is filled in from the clipboard). Keys in the list: C checked, S skip, "
+                                      "N back to new.")
         ttk.Label(r, textvariable=self.msg, style="Hint.TLabel", anchor="w").pack(
             side="bottom", fill="x", padx=8, pady=(0, 6), before=acts)
 
@@ -240,6 +252,23 @@ class StreamLogApp:
         self._later("master", MASTER_EVERY * 1000, self.download_master)
 
     # ---- actions
+    def _clipboard_pickup(self):
+        """A gamertag copied elsewhere (e.g. on SOTREP) is put in the empty Gamertag box when this window gets focus.
+        It is only filled in; adding still needs Enter."""
+        if self.gt_var.get().strip() or len(self.tv.selection()) != 1:
+            return
+        try:
+            clip = self.root.clipboard_get().strip()
+        except tk.TclError:                       # empty clipboard or not text
+            return
+        if clip == self.last_clip or not looks_like_gamertag(clip):
+            return
+        self.last_clip = clip
+        self.gt_var.set(clip)
+        self.gt_entry.focus_set()
+        self.gt_entry.select_range(0, "end")
+        self.msg.set(f"Gamertag from the clipboard: {clip}. Press Enter to add it to the master list.")
+
     def open_sotrep(self):
         for r in self._selected()[:10]:
             webbrowser.open(sotrep.twitch_search_url(r["login"]))
