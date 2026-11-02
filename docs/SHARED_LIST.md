@@ -81,3 +81,17 @@ can find them; that is fine, because the database only lets that key read the li
 Supabase's free tier pauses a project after about a week without any requests. Every copy of the app downloads the
 list at start, so an active user base keeps it awake; if it does get paused, un-pause it in the Supabase dashboard.
 Storage is far beyond what this needs (a link is ~100 bytes).
+
+## Stream log (owner tool, not in the release)
+
+`BRPW-StreamLog.exe` (or `python streamlog.py`) remembers every Twitch channel that streams Sea of Thieves while it runs,
+so you can work through them later, also the ones that streamed while you were asleep. It uses your Twitch setup, asks
+Twitch every 5 minutes (up to 10 requests per round) and stores everything in `stream_log.db` in the app-data folder.
+
+* **To do** = seen live, not in the master list, not handled yet. Double-click opens SOTREP's search for that channel.
+* **Add to master list...** asks for the gamertag, looks up the exact XUID via your OpenXBL key and publishes it with
+  the secret key. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
+* "Keep the PC awake while logging" stops Windows from sleeping while the tool is open (the screen can still turn off).
+
+Build it with:
+`python -m PyInstaller --onefile --windowed --icon assets/app.ico --add-data "assets/icons;assets/icons" --add-data "assets/twitch_live.png;assets" --name BRPW-StreamLog streamlog.py`
