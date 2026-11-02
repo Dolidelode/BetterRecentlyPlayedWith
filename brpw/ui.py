@@ -933,8 +933,9 @@ class App(SharedListMixin):
         ttk.Label(top, textvariable=shown, style="Hint.TLabel").pack(side="right")
         box = ttk.Frame(win)
         box.pack(fill="both", expand=True, padx=10, pady=4)
-        cols = (("match", "Your player", 160), ("channel", "Channel", 140), ("viewers", "Viewers", 60),
-                ("uptime", "Live for", 65), ("lang", "Lang", 45), ("title", "Title", 330), ("tags", "Tags", 180))
+        cols = (("match", "Your player", 180), ("channel", "Channel", 160), ("viewers", "Viewers", 60),
+                ("uptime", "Live for", 65), ("lang", "Lang", 45), ("title", "Title", 420), ("tags", "Tags", 260))
+        wide = ("title", "tags")                                  # only these grow with the window
         tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=14)
         sort = {"col": None, "desc": False}
         keys = {"match": lambda s: (not match(s), match(s).casefold()), "channel": lambda s: s["name"].casefold(),
@@ -949,7 +950,7 @@ class App(SharedListMixin):
             remember()
         for c, t, w in cols:
             tv.heading(c, text=t, command=lambda c=c: sort_by(c))
-            tv.column(c, width=w, anchor="e" if c == "viewers" else "w")
+            tv.column(c, width=w, minwidth=30, anchor="e" if c == "viewers" else "w", stretch=c in wide)
         tv.tag_configure("match", background=self.pal["friend"])
         sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
