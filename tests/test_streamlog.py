@@ -104,9 +104,14 @@ def test_stream_log_window(tmp_path, monkeypatch):
     app.view.set("To do (new, not in master list)")
     app.tv.selection_set("3")
     assert all(app.tv.bind(f"<Key-{k}>") for k in "csn")                     # C / S / N keys in the list
+    root.clipboard_clear()
+    root.clipboard_append("Pasted Name")
+    app.gt_var.set("Pasted Name")                                              # pasted by hand, not picked up
     app.mark("checked")                                                        # checked: off the to-do list
-    assert shown() == ["Other"]
-    app.tv.selection_set("2")
+    assert shown() == ["Other"] and app.tv.selection() == ("2",)               # next channel selected
+    assert app.gt_var.get() == ""
+    app._clipboard_pickup()                                                    # the box stays empty
+    assert app.gt_var.get() == ""
     app.open_sotrep()
     assert opened and "sotrep" in opened[-1] and "other" in opened[-1]
     app.add_to_master()                                                        # empty box: asks for the gamertag

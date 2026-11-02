@@ -280,8 +280,13 @@ class StreamLogApp:
 
     def mark(self, status):
         rows = self._selected()
+        if not rows:
+            return
+        nxt = self._next_after(rows[-1]["twitch_id"], skip={r["twitch_id"] for r in rows})
         self.log.set_status([r["twitch_id"] for r in rows], status)
+        self._done_with_box()
         self.fill()
+        self._go_to(nxt)
 
     def add_to_master(self):
         """Link the selected channel to the gamertag in the box, in one step: exact Xbox lookup, then publish.
@@ -322,22 +327,38 @@ class StreamLogApp:
                 self.log.set_status([ch["twitch_id"]], "linked", player.gamertag, player.xuid)
                 self.master[ch["twitch_id"]] = player.gamertag
                 nxt = self._next_after(ch["twitch_id"])
-                self.gt_var.set("")
+                self._done_with_box()
                 self.fill()
-                if nxt and self.tv.exists(nxt):                  # ready for the next one
-                    self.tv.selection_set(nxt)
-                    self.tv.see(nxt)
+                self._go_to(nxt)                                 # ready for the next one
                 self.msg.set(f"Added: {player.gamertag} (XUID {player.xuid}) = Twitch {ch['name']}.")
             self._bg("publish", lambda: owner.publish([entry]), published)
 
         self._bg("lookup", lambda: self.find(key, typed), found)
 
-    def _next_after(self, iid):
+    def _done_with_box(self):
+        """Empty the Gamertag box and keep it empty: what is on the clipboard now counts as used."""
+        self.gt_var.set("")
+        try:
+            self.last_clip = self.root.clipboard_get().strip()
+        except tk.TclError:
+            pass
+
+    def _go_to(self, iid):
+        """Select a row and put the keyboard in the list, so Enter opens SOTREP and C / S / N work right away."""
+        if iid and self.tv.exists(iid):
+            self.tv.selection_set(iid)
+            self.tv.focus(iid)
+            self.tv.see(iid)
+            self.tv.focus_set()
+
+    def _next_after(self, iid, skip=()):
         rows = self.tv.get_children()
         if iid not in rows:
             return None
         i = rows.index(iid)
-        return rows[i + 1] if i + 1 < len(rows) else (rows[i - 1] if i else None)
+        after = [r for r in rows[i + 1:] if r not in skip]
+        before = [r for r in rows[:i] if r not in skip]
+        return after[0] if after else (before[-1] if before else None)
 
     def on_close(self):
         self.closing = True

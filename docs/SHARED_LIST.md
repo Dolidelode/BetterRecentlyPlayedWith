@@ -93,7 +93,8 @@ Twitch every 5 minutes (up to 10 requests per round) and stores everything in `s
   up via your OpenXBL key and published with the secret key, and the next channel is selected. No extra prompts; the
   result shows in the line below. Quicker: copy the gamertag on SOTREP and switch back; the empty box is filled from
   the clipboard (only something that looks like a gamertag), so you only press Enter.
-* Keys in the list: **C** checked, **S** skip, **N** back to new, **Enter** opens SOTREP. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
+* Keys in the list: **C** checked, **S** skip, **N** back to new, **Enter** opens SOTREP. After adding or marking, the
+  box is emptied and the next channel is selected with the keyboard in the list, so the next key press works on it. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
 * "Keep the PC awake while logging" stops Windows from sleeping while the tool is open (the screen can still turn off).
 
 Build it with:
