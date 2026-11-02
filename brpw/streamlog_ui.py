@@ -4,7 +4,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import ttk
 
 from . import sotrep
 from .paths import data_dir
@@ -100,12 +100,20 @@ class StreamLogApp:
         self.tv.bind("<Return>", lambda e: self.open_sotrep())
         acts = ttk.Frame(r)
         acts.pack(side="bottom", fill="x", padx=8, pady=(4, 8), before=box)   # buttons stay visible
+        # one-step linking: select a channel, type (or paste) the gamertag, press Enter
+        ttk.Label(acts, text="Gamertag").pack(side="left")
+        self.gt_var = tk.StringVar()
+        self.gt_entry = ttk.Entry(acts, textvariable=self.gt_var, width=22)
+        self.gt_entry.pack(side="left", padx=(4, 4))
+        self.gt_entry.bind("<Return>", lambda e: self.add_to_master())
+        ttk.Button(acts, text="Add to master list", command=self.add_to_master).pack(side="left", padx=(0, 12))
         for text, cmd in (("Open SOTREP", self.open_sotrep), ("Open Twitch", self.open_twitch),
-                          ("Add to master list...", self.add_to_master), ("Mark checked", lambda: self.mark("checked")),
-                          ("Skip", lambda: self.mark("skip")), ("Back to new", lambda: self.mark("new"))):
+                          ("Mark checked", lambda: self.mark("checked")), ("Skip", lambda: self.mark("skip")),
+                          ("Back to new", lambda: self.mark("new"))):
             ttk.Button(acts, text=text, command=cmd).pack(side="left", padx=(0, 4))
-        ttk.Label(acts, text="Double-click opens SOTREP's search for that channel", style="Hint.TLabel").pack(
-            side="right")
+        self.msg = tk.StringVar(value="Double-click opens SOTREP. Then type the gamertag and press Enter.")
+        ttk.Label(r, textvariable=self.msg, style="Hint.TLabel", anchor="w").pack(
+            side="bottom", fill="x", padx=8, pady=(0, 6), before=acts)
 
     # ---- table
     def _status_text(self, r):
@@ -235,6 +243,7 @@ class StreamLogApp:
     def open_sotrep(self):
         for r in self._selected()[:10]:
             webbrowser.open(sotrep.twitch_search_url(r["login"]))
+        self.gt_entry.focus_set()                 # back from SOTREP: type the gamertag, press Enter
 
     def open_twitch(self):
         for r in self._selected()[:10]:
@@ -245,51 +254,61 @@ class StreamLogApp:
         self.log.set_status([r["twitch_id"] for r in rows], status)
         self.fill()
 
-    def add_to_master(self, gamertag=None, confirm=True):
+    def add_to_master(self):
+        """Link the selected channel to the gamertag in the box, in one step: exact Xbox lookup, then publish.
+        Only an exact gamertag match is used; the result (or what went wrong) shows in the line below."""
         rows = self._selected()
         svc, secret = self.shared_cfg.service(), self.shared_cfg.admin_key()
+        typed = self.gt_var.get().strip()
         if len(rows) != 1:
-            return messagebox.showinfo("Add to master list", "Select one channel.", parent=self.root)
+            return self.msg.set("Select one channel first.")
+        if not typed:
+            self.gt_entry.focus_set()
+            return self.msg.set(f"Type the Xbox gamertag of {rows[0]['name']} and press Enter.")
         if not (svc and secret):
-            return messagebox.showinfo("Add to master list", "Only on the list owner's PC (Owner setup in the main "
-                                       "app's Shared list window).", parent=self.root)
+            return self.msg.set("Only on the list owner's PC (Owner setup in the main app's Shared list window).")
         try:
             key = self.xkey.get()
         except Exception:
             key = None
         if not key:
-            return messagebox.showinfo("Add to master list", "Add an OpenXBL account in the main app first; it is "
-                                       "used to look up the gamertag's Xbox ID.", parent=self.root)
+            return self.msg.set("Add an OpenXBL account in the main app first; it looks up the gamertag's Xbox ID.")
         ch = rows[0]
-        typed = gamertag if gamertag is not None else simpledialog.askstring(
-            "Add to master list", f"Xbox gamertag of Twitch channel {ch['name']}\n(e.g. from SOTREP):", parent=self.root)
-        if not typed or not typed.strip():
-            return
         owner = SharedClient(svc["url"], secret, http=self.shared_http)
+        self.msg.set(f"Looking up {typed}...")
 
         def found(res, err):
             if err:
-                return messagebox.showerror("Add to master list", err, parent=self.root)
+                return self.msg.set(f"Lookup failed: {err}")
             player, near = res
             if player is None:
-                return messagebox.showinfo("Add to master list", f"No Xbox account named exactly '{typed}'."
-                                           + (f"\nSimilar: {', '.join(near)}" if near else ""), parent=self.root)
-            if confirm and not messagebox.askyesno("Add to master list", (
-                    f"Add to the master list for everyone?\n\nXbox: {player.gamertag} (XUID {player.xuid})\n"
-                    f"Twitch: {ch['name']}"), parent=self.root):
-                return
+                return self.msg.set(f"No Xbox account named exactly '{typed}'."
+                                    + (f" Similar: {', '.join(near)}" if near else ""))
             entry = {"xuid": player.xuid, "gamertag": player.gamertag, "twitch_id": ch["twitch_id"],
                      "twitch_login": ch["login"], "twitch_name": ch["name"]}
 
             def published(_, err2):
                 if err2:
-                    return messagebox.showerror("Add to master list", err2, parent=self.root)
+                    return self.msg.set(f"Publishing failed: {err2}")
                 self.log.set_status([ch["twitch_id"]], "linked", player.gamertag, player.xuid)
                 self.master[ch["twitch_id"]] = player.gamertag
+                nxt = self._next_after(ch["twitch_id"])
+                self.gt_var.set("")
                 self.fill()
+                if nxt and self.tv.exists(nxt):                  # ready for the next one
+                    self.tv.selection_set(nxt)
+                    self.tv.see(nxt)
+                self.msg.set(f"Added: {player.gamertag} (XUID {player.xuid}) = Twitch {ch['name']}.")
             self._bg("publish", lambda: owner.publish([entry]), published)
 
-        self._bg("lookup", lambda: self.find(key, typed.strip()), found)
+        self._bg("lookup", lambda: self.find(key, typed), found)
+
+    def _next_after(self, iid):
+        rows = self.tv.get_children()
+        if iid not in rows:
+            return None
+        i = rows.index(iid)
+        return rows[i + 1] if i + 1 < len(rows) else (rows[i - 1] if i else None)
 
     def on_close(self):
         self.closing = True

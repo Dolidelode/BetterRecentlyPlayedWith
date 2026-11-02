@@ -89,8 +89,9 @@ so you can work through them later, also the ones that streamed while you were a
 Twitch every 5 minutes (up to 10 requests per round) and stores everything in `stream_log.db` in the app-data folder.
 
 * **To do** = seen live, not in the master list, not handled yet. Double-click opens SOTREP's search for that channel.
-* **Add to master list...** asks for the gamertag, looks up the exact XUID via your OpenXBL key and publishes it with
-  the secret key. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
+* Select a channel, type (or paste) the gamertag in the **Gamertag** box and press **Enter**: the exact XUID is looked
+  up via your OpenXBL key and published with the secret key, and the next channel is selected. No extra prompts; the
+  result shows in the line below. **Mark checked** (looked, nothing found yet), **Skip** and **Back to new** keep track of what you did.
 * "Keep the PC awake while logging" stops Windows from sleeping while the tool is open (the screen can still turn off).
 
 Build it with:

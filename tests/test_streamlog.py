@@ -75,9 +75,6 @@ def test_stream_log_window(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "keep_awake", lambda on: True)
     opened = []
     monkeypatch.setattr(ui.webbrowser, "open", opened.append)
-    said = []                                                                  # no real message boxes in tests
-    for kind in ("showinfo", "showerror"):
-        monkeypatch.setattr(ui.messagebox, kind, lambda title, text, **kw: said.append(text))
     fake = FakeSupabase()
     fake.master["2535400000000001"] = entry("2535400000000001", "Salty Pirate", "1", "salty")
     cfg = SharedConfig(tmp_path, tmp_path / "none.json")
@@ -111,11 +108,16 @@ def test_stream_log_window(tmp_path, monkeypatch):
     app.tv.selection_set("2")
     app.open_sotrep()
     assert opened and "sotrep" in opened[-1] and "other" in opened[-1]
-    app.add_to_master(gamertag="nobody", confirm=False)                        # no exact Xbox match: nothing added
+    app.add_to_master()                                                        # empty box: asks for the gamertag
+    assert "Type the Xbox gamertag" in app.msg.get() and not lookups
+    app.gt_var.set("nobody")
+    app.add_to_master()                                                        # no exact Xbox match: nothing added
     settle()
-    assert "2535400000000002" not in fake.master and "Close One" in said[-1]
-    app.add_to_master(gamertag="other guy", confirm=False)
+    assert "2535400000000002" not in fake.master and "Close One" in app.msg.get()
+    app.gt_var.set("other guy")
+    app.add_to_master()                                                        # one step, no extra prompts
     settle()
+    assert app.msg.get().startswith("Added: Other Guy") and app.gt_var.get() == ""
     assert lookups[-1] == ("openxbl-key", "other guy")
     assert fake.master["2535400000000002"]["twitch_id"] == "2" and fake.master["2535400000000002"]["twitch_login"] == "other"
     assert shown() == [] and {r["twitch_id"]: r["status"] for r in lg.channels()}["2"] == "linked"
