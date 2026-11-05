@@ -483,6 +483,26 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
     assert icons["New"]                                              # the icon appeared for the confirmed player
     dlg.destroy()
+    # the "Check live" button: no selection needed, everyone with source Live, only those live are listed
+    asked = []
+
+    def quiet_xbox(url, data, headers, form=False):
+        asked.extend(url.rsplit("/", 1)[1].split(","))
+        return {"content": {"people": [{"xuid": x, "presenceState": "Online", "isBroadcasting": False}
+                                       for x in url.rsplit("/", 1)[1].split(",")]}}
+    app.live.http = quiet_xbox
+    app.tree.selection_set(())
+    app.check_live_all()
+    end = _t.time() + 5
+    while "livecheck" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.05)
+    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    shown = [dlg.results_tv.item(i, "values") for i in dlg.results_tv.get_children()]
+    assert [v[0] for v in shown] == ["Old"] and shown[0][3].startswith("LIVE:")   # live on Twitch only
+    assert sorted(asked) == ["1", "2", "3"] and "1 player(s) live" in app.status.get()
+    assert "Live now" in dlg.title()
+    dlg.destroy()
     # "Guess Twitch": suggestions are only linked after the user confirms them
     app._on_twitch_guess([{"account_id": by["New2"], "gamertag": "New2", "id": "321", "login": "new2", "name": "New2",
                            "live": True, "game": "Sea of Thieves", "title": "t", "viewers": 4, "sot": True}], None)

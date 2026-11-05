@@ -264,7 +264,7 @@ class App(SharedListMixin):
         bar3 = ttk.Frame(self.players_tab)
         bar3.pack(fill="x", padx=8, pady=4)
         # per-player actions live in the right-click menu; only whole-list actions are buttons
-        ttk.Button(bar3, text="Check live", command=self.check_live_selected).pack(side="left")
+        ttk.Button(bar3, text="Check live", command=self.check_live_all).pack(side="left")
         ttk.Button(bar3, text="Guess Twitch", command=self.guess_twitch).pack(side="left", padx=4)
         ttk.Label(bar3, text="Right-click a player for more", style="Hint.TLabel").pack(side="left", padx=(6, 0))
         self.tree.bind("<Button-3>", self._row_menu)
@@ -1193,32 +1193,62 @@ class App(SharedListMixin):
 
 
     # ---- on-demand live check ----
+    ALL_XBOX = 30          # "Check live" for everyone: Xbox is asked about this many most recent players (3 requests)
+
+    def check_live_all(self):
+        """Everyone with source Live: every linked channel is asked on Twitch (100 per request), Xbox's own
+        broadcasting flag only for the ALL_XBOX most recently seen (10 per request, hourly budget). Lists who is live."""
+        with self.db.lock:
+            ids = [r["id"] for r in self.db.conn.execute(
+                "SELECT id FROM accounts WHERE source IN ('xbox-live','openxbl') ORDER BY last_seen DESC")]
+        if not ids:
+            return self.set_status("No players with source Live yet: refresh first.", error=True)
+        xbox = ids[:self.ALL_XBOX] if self.xkey.get() else []
+        tw = [l["account_id"] for l in self.db.twitch_links(ids)] if self.tcreds.configured() else []
+        if not xbox and not tw:
+            return self.set_status("Add an OpenXBL account or set up Twitch first.", error=True)
+        note = (f"Asked Twitch about {len(tw)} linked player(s)" if tw else "Twitch not set up") + \
+               (f" and Xbox about the {len(xbox)} most recently seen." if xbox else "; no OpenXBL account for Xbox.")
+        self._start_livecheck(xbox, sorted(set(xbox) | set(tw)), only_live=True, note=note)
+
     def check_live_selected(self):
         ids = self._selected_ids()
         if not ids:
             return messagebox.showinfo("Check live", "Select one or more players first (up to 20 at a time).")
         if not self.xkey.get() and not (self.tcreds.configured() and self.db.twitch_links(ids)):
             return self.set_status("Add an OpenXBL account first.", error=True)
+        self._start_livecheck(ids if self.xkey.get() else [], ids)
+
+    def _start_livecheck(self, xbox_ids, ids, only_live=False, note=""):
         if "livecheck" in self.busy:
             return
         self._set_busy("livecheck", True)
-        self.set_status(f"Checking {min(len(ids), 20)} selected player(s)...")
+        self.set_status("Checking who is live..." if only_live else f"Checking {min(len(ids), 20)} selected player(s)...")
 
         def work():
             try:
-                results = self.live.check_accounts(ids) if self.xkey.get() else self._blank_results(ids)
+                results = (self.live.check_accounts(xbox_ids, limit=self.ALL_XBOX) if only_live else
+                           self.live.check_accounts(xbox_ids)) if xbox_ids else []
+                asked = {r["id"] for r in results}
+                rest = [i for i in ids if i not in asked]
+                if rest:
+                    results += self._blank_results(rest, "not asked (only the most recent players)" if only_live
+                                                   else "no OpenXBL account added")
                 tw, tw_err = {}, None
                 links = {l["account_id"]: l for l in self.db.twitch_links(ids)}
                 if links and self.tcreds.configured():
                     try:
-                        tw = self.tcheck.check_accounts(ids)
+                        tw = self.tcheck.check_accounts(list(links))
                     except ProviderError as e:
                         tw_err = str(e)
                 for r in results:
                     r["tw"], r["tw_err"], r["tw_link"] = tw.get(r["id"]), tw_err, links.get(r["id"])
                     if r["tw_link"] is not None:
                         r["tw_link"] = dict(r["tw_link"])
-                self.q.put(("livecheck", (results, None)))
+                if only_live:
+                    results = sorted((r for r in results if self._is_live(r)),
+                                     key=lambda r: -max(r["viewers"] or 0, (r["tw"] or {}).get("viewers") or 0))
+                self.q.put(("livecheck", (results, None, only_live, note + (f" Twitch: {tw_err}" if tw_err else ""))))
             except ProviderError as e:
                 self.q.put(("livecheck", ([], str(e))))
             except Exception as e:  # never let a worker thread die silently
@@ -1226,12 +1256,17 @@ class App(SharedListMixin):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _blank_results(self, ids):
-        rows = self.db.conn.execute(
-            f"SELECT id, gamertag FROM accounts WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    def _blank_results(self, ids, error="no OpenXBL account added"):
+        with self.db.lock:
+            rows = self.db.conn.execute(
+                f"SELECT id, gamertag FROM accounts WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
         return [{"id": r["id"], "gamertag": r["gamertag"], "state": None, "title": None, "seen_at": None,
                  "broadcasting": False, "provider": None, "twitch": False, "viewers": None, "started": None,
-                 "error": "no OpenXBL account added"} for r in rows]
+                 "error": error} for r in rows]
+
+    @staticmethod
+    def _is_live(r) -> bool:
+        return bool(r["broadcasting"] or r["twitch"] or (r.get("tw") and r["tw"]["live"]))
 
     @staticmethod
     def _twitch_text(r) -> str:
@@ -1247,17 +1282,20 @@ class App(SharedListMixin):
             return f"LIVE: {tw.get('game') or 'no game set'} - {title} ({tw.get('viewers', 0)} viewers)"
         return f"{link['display_name']}: offline"
 
-    def _show_live_results(self, results):
+    def _show_live_results(self, results, only_live=False, note=""):
         win = tk.Toplevel(self.root)
-        win.title("Live check results")
+        win.title(f"Live now: {len(results)} player(s)" if only_live else "Live check results")
         win.configure(bg=self.pal["bg"])
+        rows_shown = min(max(len(results), 1), 20 if only_live else 10)
         ttk.Label(win, style="Hint.TLabel", wraplength=940, justify="left", text=(
+            (f"Everyone with source Live who is live right now. {note}\n" if only_live else "") +
+            ("Nobody is live right now.\n" if only_live and not results else "") +
             "Xbox column: Xbox's own broadcasting flag for that exact account. Xbox misses streams started from a PC "
             "and never gives the channel or title. Twitch column: only for players you linked to a channel, straight "
             "from Twitch (exact channel ID). Double-click a row to open its Twitch channel.")
         ).pack(fill="x", padx=10, pady=(10, 4))
         cols = ("player", "state", "broadcast", "twitch", "game")
-        tv = ttk.Treeview(win, columns=cols, show="headings", height=min(max(len(results), 1), 10))
+        tv = ttk.Treeview(win, columns=cols, show="headings", height=rows_shown)
         for c, t, w in (("player", "Player", 150), ("state", "Xbox says", 70), ("broadcast", "Xbox broadcasting", 250),
                         ("twitch", "Twitch", 360), ("game", "Playing / last online", 150)):
             tv.heading(c, text=t)
@@ -1266,7 +1304,7 @@ class App(SharedListMixin):
         logins = {}
         for n, r in enumerate(results):
             if r["error"]:
-                bcast, state, game = f"not checked: {r['error']}", "-", ""
+                bcast, state, game = "-" if only_live else f"not checked: {r['error']}", "-", ""
             else:
                 state = r["state"]
                 since = f", since {time.strftime('%H:%M', time.localtime(r['started']))}" if r.get("started") else ""
@@ -1278,9 +1316,7 @@ class App(SharedListMixin):
                 else:
                     bcast = "not broadcasting"
                 game = r["title"] or ""
-            tw = r.get("tw")
-            is_live = bool(r["broadcasting"] or r["twitch"] or (tw and tw["live"]))
-            iid = tv.insert("", "end", tags=("live",) if is_live else (), values=(
+            iid = tv.insert("", "end", tags=("live",) if self._is_live(r) else (), values=(
                 r["gamertag"], state or "", bcast, self._twitch_text(r), game))
             if r.get("tw_link"):
                 logins[iid] = r["tw_link"]["login"]
@@ -1288,16 +1324,17 @@ class App(SharedListMixin):
                                          for i in tv.selection() if i in logins])
         tv.pack(fill="both", expand=True, padx=10, pady=(4, 10))
         win.results_tv = tv                          # kept for tests
-        self._place_dialog(win, 1000, 140 + 26 * min(max(len(results), 1), 10))
+        self._place_dialog(win, 1000, 160 + 26 * rows_shown)
 
-    def _on_livecheck(self, results, err):
+    def _on_livecheck(self, results, err, only_live=False, note=""):
         self._set_busy("livecheck", False)
         if err:
             return self.set_status(f"Live check failed: {err}", error=True)
-        live_n = sum(1 for r in results if r["broadcasting"] or r["twitch"] or (r.get("tw") and r["tw"]["live"]))
-        self.set_status(f"Live check: {len(results)} player(s) asked, {live_n} live.")
+        live_n = sum(1 for r in results if self._is_live(r))
+        self.set_status(f"Live check: {live_n} player(s) live. {note}" if only_live else
+                        f"Live check: {len(results)} player(s) asked, {live_n} live.")
         self.reload()                                # shows the Twitch icon for anyone confirmed live
-        self._show_live_results(results)
+        self._show_live_results(results, only_live, note)
 
     def set_refresh_mode(self, mode: str):
         """'Only while SoT is open', 'Always' or 'Off' (Off also stops the background live and Twitch checks)."""
