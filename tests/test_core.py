@@ -529,6 +529,10 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.selection_set(str(by["Old"]))
     items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
     assert items["Add Xbox friend"] and items["Xbox messages..."] and items["Open Xbox profile"]
+    opened_bar = []
+    monkeypatch.setattr(social, "open_gamebar_social", lambda: opened_bar.append(1) or True)
+    app.invite_or_join()                                                     # Game Bar + gamertag on the clipboard
+    assert opened_bar and root.clipboard_get() == "Old" and "Invite to game" in app.status.get()
     app.add_friend_selected()
     settle()
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()

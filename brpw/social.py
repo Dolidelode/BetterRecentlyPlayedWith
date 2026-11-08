@@ -145,12 +145,33 @@ def profile_url(gamertag: str) -> str:
 APP_PROFILE = "msxbox://profile?xuid={}"
 
 
-def xbox_app_installed() -> bool:
+def _registered(scheme: str) -> bool:
     try:
         import winreg
-        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "msxbox"))
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, scheme))
         return True
     except (ImportError, OSError):
+        return False
+
+
+def xbox_app_installed() -> bool:
+    return _registered("msxbox")
+
+
+# Game invites and joining exist only inside Xbox's own UI. On PC that is Game Bar's "Xbox Social" widget (right-click
+# a friend: Invite to game / Join game, while you play). The widget's ID comes from the Xbox app's manifest
+# (gameBarUIExtension Id="SocialWidget"); the link form is the one Microsoft's apps use for their other widgets.
+GAMEBAR_SOCIAL = "ms-gamebar://launchForeground/activate/Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"
+
+
+def open_gamebar_social(start=None, installed=lambda: _registered("ms-gamebar")) -> bool:
+    """Open Game Bar on the Xbox Social widget. False when Game Bar is missing or refused the link."""
+    if not installed():
+        return False
+    try:
+        (start or _start)(GAMEBAR_SOCIAL)
+        return True
+    except OSError:
         return False
 
 

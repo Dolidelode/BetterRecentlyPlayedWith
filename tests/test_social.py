@@ -83,3 +83,15 @@ def test_profile_opens_in_the_xbox_app_when_installed_else_on_the_web():
     assert social.open_profile("Salty Pirate", "1", start=started.append, web=web.append,
                                installed=lambda: False) == "web"
     assert web == ["https://www.xbox.com/play/user/Salty%20Pirate"] * 3 and len(started) == 1
+
+
+def test_game_bar_social_widget_link():
+    started = []
+    assert social.open_gamebar_social(start=started.append, installed=lambda: True)
+    assert started == ["ms-gamebar://launchForeground/activate/"
+                       "Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"]
+    assert not social.open_gamebar_social(start=started.append, installed=lambda: False) and len(started) == 1
+
+    def broken(link):
+        raise OSError("no handler")
+    assert not social.open_gamebar_social(start=broken, installed=lambda: True)

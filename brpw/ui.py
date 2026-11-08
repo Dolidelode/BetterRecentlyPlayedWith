@@ -410,6 +410,7 @@ class App(SharedListMixin):
              self.remove_friend_selected if following else self.add_friend_selected, xbox_ok),
             ("Xbox messages...", self.message_selected, xbox_ok),
             ("Open Xbox profile", self.xbox_profile_selected, one),
+            ("Invite / join (Game Bar)", self.invite_or_join, one),
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
@@ -575,6 +576,23 @@ class App(SharedListMixin):
         for i in self.tree.selection()[:5]:
             self.open_xbox_profile(self.tree.set(i, "gamertag"), self.tree.set(i, "xuid"))
 
+    def invite_or_join(self, gt=None):
+        """Xbox only offers game invites and joining inside its own UI: open Game Bar's Xbox Social widget and put
+        the gamertag on the clipboard to find the player there."""
+        if gt is None:
+            p = self._one_player()
+            if not p:
+                return self.set_status("Select one player first.", error=True)
+            gt = p[0]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(gt)
+        if social.open_gamebar_social():
+            self.set_status(f"Game Bar opened ({gt} copied). In Xbox Social, right-click {gt}: Invite to game / "
+                            "Join game. Works while you play, if the game and their privacy settings allow it.")
+        else:
+            self.set_status(f"Couldn't open Game Bar ({gt} copied). Press Win+G, open Xbox Social and right-click "
+                            "the player: Invite to game / Join game.", error=True)
+
     def open_xbox_profile(self, gt, xuid):
         where = social.open_profile(gt, xuid)
         self.set_status(f"Opened {gt}'s profile " + ("in the Xbox app." if where == "app" else
@@ -600,7 +618,8 @@ class App(SharedListMixin):
         info = tk.StringVar(value="Loading your messages...")
         tk.Label(head, textvariable=info, bg=pal["head"], fg=pal["muted"], font=("Segoe UI", 9)).pack(side="left")
         ttk.Button(head, text="Xbox profile", command=lambda: self.open_xbox_profile(gt, xuid)).pack(
-            side="right", padx=12)
+            side="right", padx=(4, 12))
+        ttk.Button(head, text="Invite / join", command=lambda: self.invite_or_join(gt)).pack(side="right")
 
         # scrollable message area: a frame inside a canvas, kept as wide as the canvas
         area = tk.Frame(win, bg=pal["bg"])
@@ -760,6 +779,8 @@ class App(SharedListMixin):
             lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"])))).pack(side="left", padx=4)
         ttk.Button(bar, text="Xbox profile", command=lambda: with_one(
             lambda f: self.open_xbox_profile(f["gamertag"], f["xuid"]))).pack(side="left", padx=(0, 4))
+        ttk.Button(bar, text="Invite / join", command=lambda: with_one(
+            lambda f: self.invite_or_join(f["gamertag"]))).pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="Remove friend", command=lambda: with_one(
             lambda f: self.remove_friend_selected(f["gamertag"], f["xuid"], after=load))).pack(side="left")
         ttk.Button(bar, text="Refresh", command=lambda: load()).pack(side="right")
@@ -780,7 +801,7 @@ class App(SharedListMixin):
                 people[iid] = f
             n_on = sum(1 for f in res if f["state"].casefold() == "online")
             info.set(f"{len(res)} in your Xbox list ({self.xkey.active()}), {n_on} online. "
-                     "Double-click for messages. Invite or join: open their Xbox profile (Xbox has no API for it).")
+                     "Double-click for messages. Invite / join opens Game Bar's Xbox Social, where Xbox offers it.")
             owner = self.xkey.active()
             if owner:
                 self.db.replace_friends(owner, {f["xuid"]: f["relation"] for f in res})
