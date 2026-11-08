@@ -389,6 +389,13 @@ class Database:
                                   [(owner, x, r) for x, r in relations.items()])
         self.set_setting("friends_at:" + owner, str(int(time.time())))
 
+    def set_friend(self, owner: str, xuid: str, relation: Optional[str]) -> None:
+        """One change made from the app (added or removed a friend); None removes the row."""
+        with self.lock, self.conn:
+            self.conn.execute("DELETE FROM friends WHERE owner=? AND xuid=?", (owner, xuid))
+            if relation:
+                self.conn.execute("INSERT INTO friends(owner,xuid,relation) VALUES(?,?,?)", (owner, xuid, relation))
+
     def friend_relations(self, owner: Optional[str]) -> dict:
         with self.lock:
             return {r[0]: r[1] for r in self.conn.execute(

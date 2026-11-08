@@ -503,6 +503,50 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert sorted(asked) == ["1", "2", "3"] and "1 player(s) live" in app.status.get()
     assert "Live now" in dlg.title()
     dlg.destroy()
+    # Xbox friends and messages: only on click, through the documented OpenXBL endpoints
+    from brpw import social
+    sent = []
+
+    def fake_call(method, url, key, data=None):
+        sent.append((method, url.rsplit("/v2/", 1)[1], data))
+        return {"content": {"people": [{"xuid": "2", "gamertag": "New", "presenceState": "Online",
+                                        "presenceText": "Sea of Thieves", "isFollowedByCaller": True,
+                                        "isFollowingCaller": True}]}} if method == "GET" else {}
+    monkeypatch.setattr(social, "openxbl_call", fake_call)
+
+    def settle():
+        end = _t.time() + 5
+        while "social" in app.busy and _t.time() < end:
+            root.update()
+            _t.sleep(0.02)
+        root.update()
+    app.tree.selection_set(str(by["Old"]))
+    items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
+    assert items["Add Xbox friend"] and items["Send Xbox message..."]
+    app.add_friend_selected()
+    settle()
+    assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()
+    items = {label for label, cmd, enabled in app._row_menu_items() if label}
+    assert "Remove Xbox friend..." in items                                  # now in your list
+    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: False)
+    app.remove_friend_selected()                                              # declined: nothing sent
+    assert sent[-1][0] == "PUT"
+    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: True)
+    app.remove_friend_selected()
+    settle()
+    assert sent[-1] == ("DELETE", "friends/1", None)
+    msg = app.message_dialog("Old", "1")
+    msg.box.insert("1.0", "Ahoy! Fancy a voyage?")
+    msg.send()
+    settle()
+    assert sent[-1] == ("POST", "conversations", {"xuid": "1", "message": "Ahoy! Fancy a voyage?"})
+    assert not msg.winfo_exists() and "sent to Old" in app.status.get()
+    fr = app.friends_dialog()
+    settle()
+    row = fr.friends_tv.item(fr.friends_tv.get_children()[0], "values")
+    assert row[0] == "New" and row[1] == "Online" and row[2] == "Sea of Thieves" and "1 online" in fr.info.get()
+    assert d.friend_relations("Main") == {"2": "Friend"}                     # the Friend highlight is refreshed too
+    fr.destroy()
     # "Guess Twitch": suggestions are only linked after the user confirms them
     app._on_twitch_guess([{"account_id": by["New2"], "gamertag": "New2", "id": "321", "login": "new2", "name": "New2",
                            "live": True, "game": "Sea of Thieves", "title": "t", "viewers": 4, "sot": True}], None)

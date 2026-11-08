@@ -7,7 +7,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from . import __version__, sotrep, updater
+from . import __version__, social, sotrep, updater
 from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
@@ -266,6 +266,7 @@ class App(SharedListMixin):
         # per-player actions live in the right-click menu; only whole-list actions are buttons
         ttk.Button(bar3, text="Check live", command=self.check_live_all).pack(side="left")
         ttk.Button(bar3, text="Guess Twitch", command=self.guess_twitch).pack(side="left", padx=4)
+        ttk.Button(bar3, text="Friends...", command=self.friends_dialog).pack(side="left")
         ttk.Label(bar3, text="Right-click a player for more", style="Hint.TLabel").pack(side="left", padx=(6, 0))
         self.tree.bind("<Button-3>", self._row_menu)
         self.tree.bind("<Shift-F10>", self._row_menu)
@@ -396,11 +397,18 @@ class App(SharedListMixin):
         linked = bool(self.db.twitch_links(ids))
         never = self.db.twitch_never(ids)
         all_never = bool(ids) and len(never) == len(ids)
+        p = self._one_player() if one else None
+        xbox_ok = bool(p and p[1] and self.xkey.get())
+        following = xbox_ok and self.db.friend_relations(self.xkey.active()).get(p[1]) in self.FOLLOWING
         return [
             ("Open SOTREP", self.open_selected, True),
             ("Open Twitch", self.open_twitch_selected, linked),
             ("Check live", self.check_live_selected, True),
             ("Encounters", self.encounters_dialog, True),
+            (None, None, True),
+            ("Remove Xbox friend..." if following else "Add Xbox friend",
+             self.remove_friend_selected if following else self.add_friend_selected, xbox_ok),
+            ("Send Xbox message...", self.message_selected, xbox_ok),
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
@@ -500,6 +508,186 @@ class App(SharedListMixin):
     def open_selected(self):
         for i in self.tree.selection():
             webbrowser.open(sotrep.profile_url(self.tree.set(i, "gamertag")))
+
+    # ---- Xbox friends and messages (OpenXBL, only when the user clicks) ----
+    FOLLOWING = ("Friend", "You follow", "In your list")
+
+    def _xbox_bg(self, work, done):
+        """Run work(key) off the UI thread; done(result, error) runs on the UI thread."""
+        key = self.xkey.get()
+        if not key:
+            return self.set_status("Add an OpenXBL account first.", error=True)
+        self._set_busy("social", True)
+
+        def run():
+            try:
+                res, err = work(key), None
+            except ProviderError as e:
+                res, err = None, str(e)
+            except Exception as e:                  # never let a worker thread die silently
+                res, err = None, f"Unexpected error: {e}"
+            self.q.put(("call", lambda: (self._set_busy("social", False), done(res, err))))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _one_player(self):
+        """(gamertag, xuid) of the single selected player, or None."""
+        sel = self.tree.selection()
+        if len(sel) != 1:
+            return None
+        return self.tree.set(sel[0], "gamertag"), self.tree.set(sel[0], "xuid")
+
+    def add_friend_selected(self):
+        p = self._one_player()
+        if not p or not p[1]:
+            return self.set_status("Select one player with an XUID first.", error=True)
+        gt, xuid = p
+
+        def done(_, err):
+            if err:
+                return self.set_status(f"Could not add {gt}: {err}", error=True)
+            self.db.set_friend(self.xkey.active() or "", xuid, "You follow")
+            self.set_status(f"Added {gt} as a friend on Xbox. It becomes mutual once they add you back.")
+            self.reload()
+        self._xbox_bg(lambda k: social.add_friend(k, xuid), done)
+
+    def remove_friend_selected(self, gt=None, xuid=None, after=None):
+        if gt is None:
+            p = self._one_player()
+            if not p or not p[1]:
+                return self.set_status("Select one player with an XUID first.", error=True)
+            gt, xuid = p
+        if not messagebox.askyesno("Remove friend", f"Remove {gt} from your Xbox friends?"):
+            return
+
+        def done(_, err):
+            if err:
+                return self.set_status(f"Could not remove {gt}: {err}", error=True)
+            self.db.set_friend(self.xkey.active() or "", xuid, None)
+            self.set_status(f"Removed {gt} from your Xbox friends.")
+            self.reload()
+            if after:
+                after()
+        self._xbox_bg(lambda k: social.remove_friend(k, xuid), done)
+
+    def message_selected(self):
+        p = self._one_player()
+        if not p or not p[1]:
+            return self.set_status("Select one player with an XUID first.", error=True)
+        self.message_dialog(*p)
+
+    def message_dialog(self, gt, xuid):
+        """Write and send one Xbox message. Nothing is sent until Send is pressed."""
+        win = tk.Toplevel(self.root)
+        win.title(f"Xbox message to {gt}")
+        win.configure(bg=self.pal["bg"])
+        win.transient(self.root)
+        ttk.Label(win, style="Hint.TLabel", wraplength=420, justify="left", text=(
+            f"Sent from your Xbox account ({self.xkey.active() or 'not set'}) as a normal Xbox message. "
+            "Someone who isn't your friend gets it as a message request.")).pack(fill="x", padx=12, pady=(12, 4))
+        box = tk.Text(win, width=56, height=6, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
+                      insertbackground=self.pal["fg"], relief="flat", font=("Segoe UI", 10))
+        box.pack(fill="both", expand=True, padx=12, pady=4)
+        state = tk.StringVar(value=f"0 / {social.MAX_MESSAGE}")
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=12, pady=(4, 12))
+        ttk.Label(bar, textvariable=state, style="Hint.TLabel").pack(side="left")
+        send_btn = ttk.Button(bar, text="Send")
+        send_btn.pack(side="right")
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=6)
+        box.bind("<KeyRelease>", lambda e: state.set(f"{len(box.get('1.0', 'end').strip())} / {social.MAX_MESSAGE}"))
+
+        def send():
+            text = box.get("1.0", "end").strip()
+            send_btn.state(["disabled"])
+            state.set("Sending...")
+
+            def done(_, err):
+                if not win.winfo_exists():
+                    return self.set_status(f"Message to {gt}: {'failed: ' + err if err else 'sent.'}", error=bool(err))
+                if err:
+                    send_btn.state(["!disabled"])
+                    return state.set(f"Not sent: {err}")
+                self.set_status(f"Xbox message sent to {gt}.")
+                win.destroy()
+            self._xbox_bg(lambda k: social.send_message(k, xuid, text), done)
+        send_btn.configure(command=send)
+        win.send = send                              # kept for tests
+        win.box = box
+        box.focus_set()
+        self._place_dialog(win)
+        return win
+
+    def friends_dialog(self):
+        """Your Xbox friends, online first, with what they are doing. Also refreshes the Friend highlight."""
+        win = tk.Toplevel(self.root)
+        win.title("Xbox friends")
+        win.configure(bg=self.pal["bg"])
+        info = tk.StringVar(value="Loading your friends from Xbox...")
+        ttk.Label(win, textvariable=info, style="Hint.TLabel").pack(fill="x", padx=10, pady=(10, 4))
+        box = ttk.Frame(win)
+        box.pack(fill="both", expand=True, padx=10, pady=4)
+        cols = (("gamertag", "Gamertag", 170), ("state", "Status", 70), ("text", "Doing / last seen", 300),
+                ("relation", "Relation", 90))
+        tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=16)
+        for c, t, w in cols:
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor="w", stretch=c == "text")
+        tv.tag_configure("online", background=self.pal["friend"])
+        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        people = {}
+
+        def chosen():
+            sel = tv.selection()
+            return people.get(sel[0]) if len(sel) == 1 else None
+
+        def with_one(fn):
+            f = chosen()
+            if f is None:
+                return info.set("Select one friend first.")
+            fn(f)
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(4, 10))
+        ttk.Button(bar, text="Send message...", command=lambda: with_one(
+            lambda f: self.message_dialog(f["gamertag"], f["xuid"]))).pack(side="left")
+        ttk.Button(bar, text="Open SOTREP", command=lambda: with_one(
+            lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"])))).pack(side="left", padx=4)
+        ttk.Button(bar, text="Remove friend", command=lambda: with_one(
+            lambda f: self.remove_friend_selected(f["gamertag"], f["xuid"], after=load))).pack(side="left")
+        ttk.Button(bar, text="Refresh", command=lambda: load()).pack(side="right")
+        tv.bind("<Double-1>", lambda e: with_one(lambda f: self.message_dialog(f["gamertag"], f["xuid"])))
+
+        def show(res, err):
+            if not win.winfo_exists():
+                return
+            if err:
+                return info.set(f"Could not load your friends: {err}")
+            tv.delete(*tv.get_children())
+            people.clear()
+            for f in res:
+                online = f["state"].casefold() == "online"
+                doing = f["text"] or ("" if online else (f"last seen {fmt_ts(f['last_seen'])}" if f["last_seen"] else ""))
+                iid = tv.insert("", "end", tags=("online",) if online else (), values=(
+                    ("★ " if f["favorite"] else "") + f["gamertag"], f["state"], doing, f["relation"]))
+                people[iid] = f
+            n_on = sum(1 for f in res if f["state"].casefold() == "online")
+            info.set(f"{len(res)} in your Xbox list ({self.xkey.active()}), {n_on} online. "
+                     "Double-click to send a message. Xbox has no way to invite to or join a game from here.")
+            owner = self.xkey.active()
+            if owner:
+                self.db.replace_friends(owner, {f["xuid"]: f["relation"] for f in res})
+                self.reload()
+
+        def load():
+            info.set("Loading your friends from Xbox...")
+            self._xbox_bg(social.friend_list, show)
+        win.friends_tv, win.show, win.info = tv, show, info   # kept for tests
+        self._place_dialog(win, 720, 520)
+        load()
+        return win
 
     def _place_dialog(self, win, width=None, height=None):
         """Centre a dialog over the main window and bring it to the front. Without this Windows may put a
