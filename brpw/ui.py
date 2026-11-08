@@ -408,7 +408,8 @@ class App(SharedListMixin):
             (None, None, True),
             ("Remove Xbox friend..." if following else "Add Xbox friend",
              self.remove_friend_selected if following else self.add_friend_selected, xbox_ok),
-            ("Send Xbox message...", self.message_selected, xbox_ok),
+            ("Xbox messages...", self.message_selected, xbox_ok),
+            ("Open Xbox profile", self.xbox_profile_selected, one),
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
@@ -569,6 +570,11 @@ class App(SharedListMixin):
                 after()
         self._xbox_bg(lambda k: social.remove_friend(k, xuid), done)
 
+    def xbox_profile_selected(self):
+        """Xbox's own profile page for the player; whatever Xbox itself offers (invite, join) is there."""
+        for i in self.tree.selection()[:5]:
+            webbrowser.open(social.profile_url(self.tree.set(i, "gamertag")))
+
     def message_selected(self):
         p = self._one_player()
         if not p or not p[1]:
@@ -576,25 +582,54 @@ class App(SharedListMixin):
         self.message_dialog(*p)
 
     def message_dialog(self, gt, xuid):
-        """Write and send one Xbox message. Nothing is sent until Send is pressed."""
+        """Your Xbox messages with one player, and a box to write a new one. Nothing is sent until Send."""
         win = tk.Toplevel(self.root)
-        win.title(f"Xbox message to {gt}")
+        win.title(f"Xbox messages: {gt}")
         win.configure(bg=self.pal["bg"])
-        win.transient(self.root)
-        ttk.Label(win, style="Hint.TLabel", wraplength=420, justify="left", text=(
-            f"Sent from your Xbox account ({self.xkey.active() or 'not set'}) as a normal Xbox message. "
-            "Someone who isn't your friend gets it as a message request.")).pack(fill="x", padx=12, pady=(12, 4))
-        box = tk.Text(win, width=56, height=6, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=12, pady=(12, 4))
+        info = tk.StringVar(value="Loading your messages...")
+        ttk.Label(top, textvariable=info, style="Hint.TLabel", wraplength=470, justify="left").pack(side="left")
+        ttk.Button(top, text="Xbox profile", command=lambda: webbrowser.open(social.profile_url(gt))).pack(side="right")
+        log = scrolledtext.ScrolledText(win, width=64, height=14, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
+                                        relief="flat", font=("Segoe UI", 10), state="disabled")
+        log.tag_configure("me", foreground=self.pal["accent"])
+        log.tag_configure("when", foreground=self.pal["muted"])
+        log.pack(fill="both", expand=True, padx=12, pady=4)
+        box = tk.Text(win, width=64, height=4, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
                       insertbackground=self.pal["fg"], relief="flat", font=("Segoe UI", 10))
-        box.pack(fill="both", expand=True, padx=12, pady=4)
-        state = tk.StringVar(value=f"0 / {social.MAX_MESSAGE}")
+        box.pack(fill="x", padx=12, pady=4)
+        state = tk.StringVar(value=f"0 / {social.MAX_MESSAGE}   Ctrl+Enter sends. Someone who isn't your friend "
+                                   "gets it as a message request.")
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=12, pady=(4, 12))
         ttk.Label(bar, textvariable=state, style="Hint.TLabel").pack(side="left")
         send_btn = ttk.Button(bar, text="Send")
         send_btn.pack(side="right")
-        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=6)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right", padx=6)
         box.bind("<KeyRelease>", lambda e: state.set(f"{len(box.get('1.0', 'end').strip())} / {social.MAX_MESSAGE}"))
+
+        def show(res, err):
+            if not win.winfo_exists():
+                return
+            if err:
+                return info.set(f"Could not load the messages: {err}")
+            log.configure(state="normal")
+            log.delete("1.0", "end")
+            for m in res["messages"]:
+                mine = m["sender"] != xuid
+                log.insert("end", ("You" if mine else gt), ("me",) if mine else ())
+                log.insert("end", f"  {fmt_ts(m['at']) if m['at'] else ''}\n", ("when",))
+                log.insert("end", m["text"] + "\n\n")
+            log.configure(state="disabled")
+            log.see("end")
+            n = len(res["messages"])
+            info.set((f"{n} message(s) with {gt}" if n else f"No messages with {gt} yet")
+                     + (" (only the newest ones: OpenXBL can't fetch older ones)." if res["more"] else ".")
+                     + f" Sent from {self.xkey.active() or 'your account'}.")
+
+        def load():
+            self._xbox_bg(lambda k: social.history(k, xuid), show)
 
         def send():
             text = box.get("1.0", "end").strip()
@@ -604,17 +639,20 @@ class App(SharedListMixin):
             def done(_, err):
                 if not win.winfo_exists():
                     return self.set_status(f"Message to {gt}: {'failed: ' + err if err else 'sent.'}", error=bool(err))
+                send_btn.state(["!disabled"])
                 if err:
-                    send_btn.state(["!disabled"])
                     return state.set(f"Not sent: {err}")
+                box.delete("1.0", "end")
+                state.set(f"Sent. 0 / {social.MAX_MESSAGE}")
                 self.set_status(f"Xbox message sent to {gt}.")
-                win.destroy()
+                load()
             self._xbox_bg(lambda k: social.send_message(k, xuid, text), done)
         send_btn.configure(command=send)
-        win.send = send                              # kept for tests
-        win.box = box
+        box.bind("<Control-Return>", lambda e: (send(), "break")[1])
+        win.send, win.box, win.log, win.info = send, box, log, info   # kept for tests
         box.focus_set()
-        self._place_dialog(win)
+        self._place_dialog(win, 620, 560)
+        load()
         return win
 
     def friends_dialog(self):
@@ -651,10 +689,12 @@ class App(SharedListMixin):
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(4, 10))
-        ttk.Button(bar, text="Send message...", command=lambda: with_one(
+        ttk.Button(bar, text="Messages...", command=lambda: with_one(
             lambda f: self.message_dialog(f["gamertag"], f["xuid"]))).pack(side="left")
         ttk.Button(bar, text="Open SOTREP", command=lambda: with_one(
             lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"])))).pack(side="left", padx=4)
+        ttk.Button(bar, text="Xbox profile", command=lambda: with_one(
+            lambda f: webbrowser.open(social.profile_url(f["gamertag"])))).pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="Remove friend", command=lambda: with_one(
             lambda f: self.remove_friend_selected(f["gamertag"], f["xuid"], after=load))).pack(side="left")
         ttk.Button(bar, text="Refresh", command=lambda: load()).pack(side="right")
@@ -675,7 +715,7 @@ class App(SharedListMixin):
                 people[iid] = f
             n_on = sum(1 for f in res if f["state"].casefold() == "online")
             info.set(f"{len(res)} in your Xbox list ({self.xkey.active()}), {n_on} online. "
-                     "Double-click to send a message. Xbox has no way to invite to or join a game from here.")
+                     "Double-click for messages. Invite or join: open their Xbox profile (Xbox has no API for it).")
             owner = self.xkey.active()
             if owner:
                 self.db.replace_friends(owner, {f["xuid"]: f["relation"] for f in res})

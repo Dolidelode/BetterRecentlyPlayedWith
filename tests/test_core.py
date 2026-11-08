@@ -509,6 +509,12 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
 
     def fake_call(method, url, key, data=None):
         sent.append((method, url.rsplit("/v2/", 1)[1], data))
+        if "/messages/" in url:
+            return {"content": {"continuationToken": None, "messages": [
+                {"sender": "1", "timestamp": "2026-11-07T20:00:00Z", "type": "ContentMessage",
+                 "contentPayload": {"content": {"parts": [{"contentType": "text", "text": "gg last night"}]}}},
+                {"sender": "999", "timestamp": "2026-11-07T20:05:00Z", "isDeleted": True,
+                 "contentPayload": {"content": {"parts": [{"contentType": "text", "text": "gone"}]}}}]}}
         return {"content": {"people": [{"xuid": "2", "gamertag": "New", "presenceState": "Online",
                                         "presenceText": "Sea of Thieves", "isFollowedByCaller": True,
                                         "isFollowingCaller": True}]}} if method == "GET" else {}
@@ -522,7 +528,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         root.update()
     app.tree.selection_set(str(by["Old"]))
     items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
-    assert items["Add Xbox friend"] and items["Send Xbox message..."]
+    assert items["Add Xbox friend"] and items["Xbox messages..."] and items["Open Xbox profile"]
     app.add_friend_selected()
     settle()
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()
@@ -536,11 +542,17 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     settle()
     assert sent[-1] == ("DELETE", "friends/1", None)
     msg = app.message_dialog("Old", "1")
+    settle()
+    assert sent[-1] == ("GET", "messages/1", None)                         # the history with that player
+    assert "gg last night" in msg.log.get("1.0", "end") and "gone" not in msg.log.get("1.0", "end")
+    assert "1 message(s) with Old" in msg.info.get()
     msg.box.insert("1.0", "Ahoy! Fancy a voyage?")
     msg.send()
     settle()
-    assert sent[-1] == ("POST", "conversations", {"xuid": "1", "message": "Ahoy! Fancy a voyage?"})
-    assert not msg.winfo_exists() and "sent to Old" in app.status.get()
+    assert ("POST", "conversations", {"xuid": "1", "message": "Ahoy! Fancy a voyage?"}) in sent
+    assert sent[-1] == ("GET", "messages/1", None)                         # reloaded after sending
+    assert msg.winfo_exists() and msg.box.get("1.0", "end").strip() == "" and "sent to Old" in app.status.get()
+    msg.destroy()
     fr = app.friends_dialog()
     settle()
     row = fr.friends_tv.item(fr.friends_tv.get_children()[0], "values")

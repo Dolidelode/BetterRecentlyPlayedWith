@@ -105,5 +105,39 @@ def parse_friend_list(payload) -> List[dict]:
     return out
 
 
+def parse_history(payload) -> dict:
+    """{"messages": [{"sender", "text", "at"}...] oldest first, "more": bool}. Shape seen for real:
+    content.messages[].contentPayload.content.parts[] with contentType "text"; deleted messages are left out."""
+    content = payload.get("content") if isinstance(payload, dict) else None
+    msgs = content.get("messages") if isinstance(content, dict) else None
+    if not isinstance(msgs, list):
+        raise ProviderError("Unexpected message history from OpenXBL.")
+    out = []
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("isDeleted"):
+            continue
+        cp = (m.get("contentPayload") or {}).get("content")
+        parts = cp.get("parts") if isinstance(cp, dict) else None
+        if isinstance(parts, list):
+            text = " ".join(str(p.get("text") or "") for p in parts if isinstance(p, dict)
+                            and p.get("contentType") == "text").strip() or "(not text: picture or other content)"
+        else:
+            text = str(cp) if isinstance(cp, str) else "(not text: picture or other content)"
+        out.append({"sender": str(m.get("sender") or ""), "text": text, "at": _iso_to_epoch(m.get("timestamp"))})
+    out.sort(key=lambda m: m["at"] or 0)
+    return {"messages": out, "more": content.get("continuationToken") is not None}
+
+
+def history(key: str, xuid, call: Call = None) -> dict:
+    """Your messages with one player. The conversation list endpoints answer 405 at OpenXBL right now, so history
+    is per player only. OpenXBL documents no way to page further back."""
+    return parse_history((call or openxbl_call)("GET", API + "messages/" + _check_xuid(xuid), key))
+
+
+def profile_url(gamertag: str) -> str:
+    """Xbox's own profile page (sign-in needed); Xbox's own options for a player are there."""
+    return "https://www.xbox.com/play/user/" + urllib.parse.quote(gamertag.strip())
+
+
 def friend_list(key: str, call: Call = None) -> List[dict]:
     return parse_friend_list((call or openxbl_call)("GET", FRIENDS_URL, key))

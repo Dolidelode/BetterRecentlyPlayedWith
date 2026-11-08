@@ -48,3 +48,21 @@ def test_friend_list_online_and_favorites_first():
     assert fl[1]["relation"] == "You follow" and fl[1]["text"] == "Sea of Thieves" and fl[2]["last_seen"]
     with pytest.raises(ProviderError):
         social.parse_friend_list({"content": "nope"})
+
+
+def test_history_oldest_first_without_deleted_and_with_more_flag():
+    c = Calls({"content": {"continuationToken": "abc", "messages": [
+        {"sender": "2", "timestamp": "2026-11-07T21:00:00Z",
+         "contentPayload": {"content": {"parts": [{"contentType": "text", "text": "second"}]}}},
+        {"sender": "1", "timestamp": "2026-11-07T20:00:00Z",
+         "contentPayload": {"content": {"parts": [{"contentType": "text", "text": "first"}]}}},
+        {"sender": "1", "timestamp": "2026-11-07T20:30:00Z", "isDeleted": True, "contentPayload": {}},
+        {"sender": "2", "timestamp": "2026-11-07T22:00:00Z",
+         "contentPayload": {"content": {"parts": [{"contentType": "image"}]}}}]}})
+    h = social.history("k", "2", call=c)
+    assert c.seen[0][:2] == ("GET", "https://api.xbl.io/v2/messages/2")
+    assert [m["text"] for m in h["messages"]] == ["first", "second", "(not text: picture or other content)"]
+    assert h["more"] and h["messages"][0]["sender"] == "1" and h["messages"][0]["at"]
+    with pytest.raises(ProviderError):
+        social.parse_history({"content": {}})
+    assert social.profile_url(" Salty Pirate ") == "https://www.xbox.com/play/user/Salty%20Pirate"
