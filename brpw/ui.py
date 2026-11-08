@@ -571,9 +571,14 @@ class App(SharedListMixin):
         self._xbox_bg(lambda k: social.remove_friend(k, xuid), done)
 
     def xbox_profile_selected(self):
-        """Xbox's own profile page for the player; whatever Xbox itself offers (invite, join) is there."""
+        """The player's profile in the Xbox app (or on xbox.com); whatever Xbox itself offers (invite, join) is there."""
         for i in self.tree.selection()[:5]:
-            webbrowser.open(social.profile_url(self.tree.set(i, "gamertag")))
+            self.open_xbox_profile(self.tree.set(i, "gamertag"), self.tree.set(i, "xuid"))
+
+    def open_xbox_profile(self, gt, xuid):
+        where = social.open_profile(gt, xuid)
+        self.set_status(f"Opened {gt}'s profile " + ("in the Xbox app." if where == "app" else
+                        "on xbox.com (the Xbox app isn't installed, or the player has no XUID)."))
 
     def message_selected(self):
         p = self._one_player()
@@ -582,51 +587,110 @@ class App(SharedListMixin):
         self.message_dialog(*p)
 
     def message_dialog(self, gt, xuid):
-        """Your Xbox messages with one player, and a box to write a new one. Nothing is sent until Send."""
+        """Chat with one player: your Xbox message history as bubbles (yours right, theirs left) and a box to
+        write a new one. Nothing is sent until Send (or Ctrl+Enter)."""
+        pal = self.pal
         win = tk.Toplevel(self.root)
         win.title(f"Xbox messages: {gt}")
-        win.configure(bg=self.pal["bg"])
-        top = ttk.Frame(win)
-        top.pack(fill="x", padx=12, pady=(12, 4))
+        win.configure(bg=pal["bg"])
+        head = tk.Frame(win, bg=pal["head"])
+        head.pack(fill="x")
+        tk.Label(head, text=gt, bg=pal["head"], fg=pal["fg"], font=("Segoe UI", 13, "bold")).pack(
+            side="left", padx=(14, 6), pady=10)
         info = tk.StringVar(value="Loading your messages...")
-        ttk.Label(top, textvariable=info, style="Hint.TLabel", wraplength=470, justify="left").pack(side="left")
-        ttk.Button(top, text="Xbox profile", command=lambda: webbrowser.open(social.profile_url(gt))).pack(side="right")
-        log = scrolledtext.ScrolledText(win, width=64, height=14, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
-                                        relief="flat", font=("Segoe UI", 10), state="disabled")
-        log.tag_configure("me", foreground=self.pal["accent"])
-        log.tag_configure("when", foreground=self.pal["muted"])
-        log.pack(fill="both", expand=True, padx=12, pady=4)
-        box = tk.Text(win, width=64, height=4, wrap="word", bg=self.pal["panel"], fg=self.pal["fg"],
-                      insertbackground=self.pal["fg"], relief="flat", font=("Segoe UI", 10))
-        box.pack(fill="x", padx=12, pady=4)
-        state = tk.StringVar(value=f"0 / {social.MAX_MESSAGE}   Ctrl+Enter sends. Someone who isn't your friend "
-                                   "gets it as a message request.")
-        bar = ttk.Frame(win)
-        bar.pack(fill="x", padx=12, pady=(4, 12))
-        ttk.Label(bar, textvariable=state, style="Hint.TLabel").pack(side="left")
-        send_btn = ttk.Button(bar, text="Send")
-        send_btn.pack(side="right")
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right", padx=6)
-        box.bind("<KeyRelease>", lambda e: state.set(f"{len(box.get('1.0', 'end').strip())} / {social.MAX_MESSAGE}"))
+        tk.Label(head, textvariable=info, bg=pal["head"], fg=pal["muted"], font=("Segoe UI", 9)).pack(side="left")
+        ttk.Button(head, text="Xbox profile", command=lambda: self.open_xbox_profile(gt, xuid)).pack(
+            side="right", padx=12)
+
+        # scrollable message area: a frame inside a canvas, kept as wide as the canvas
+        area = tk.Frame(win, bg=pal["bg"])
+        area.pack(fill="both", expand=True)
+        canvas = tk.Canvas(area, bg=pal["bg"], highlightthickness=0)
+        sb = ttk.Scrollbar(area, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=pal["bg"])
+        inner_id = canvas.create_window(0, 0, window=inner, anchor="nw")
+        bubbles = []
+
+        def on_resize(e):
+            canvas.itemconfigure(inner_id, width=e.width)
+            for b in bubbles:
+                b.configure(wraplength=max(160, int(e.width * 0.62)))
+        canvas.bind("<Configure>", on_resize)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def wheel(e):
+            canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
+        win.bind("<MouseWheel>", wheel)
+
+        compose = tk.Frame(win, bg=pal["panel"])
+        compose.pack(fill="x")
+        send_btn = ttk.Button(compose, text="Send", width=8)
+        send_btn.pack(side="right", padx=(0, 12), pady=10)             # packed first so the box can't squeeze it
+        box = tk.Text(compose, height=3, wrap="word", bg=pal["bg"], fg=pal["fg"], insertbackground=pal["fg"],
+                      relief="flat", font=("Segoe UI", 10), padx=8, pady=6)
+        box.pack(side="left", fill="both", expand=True, padx=(12, 8), pady=10)
+        state = tk.StringVar()
+        hint = f"Ctrl+Enter sends · at most {social.MAX_MESSAGE} characters · non-friends get it as a message request"
+        tk.Label(win, textvariable=state, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8), anchor="w").pack(
+            fill="x", padx=12, pady=(0, 6))
+        state.set(hint)
+        box.bind("<KeyRelease>", lambda e: state.set(
+            f"{len(box.get('1.0', 'end').strip())} / {social.MAX_MESSAGE}  ·  Ctrl+Enter sends"))
+
+        def day_label(at):
+            d = time.localtime(at)
+            today = time.localtime()
+            yesterday = time.localtime(time.time() - 86400)
+            if d[:3] == today[:3]:
+                return "Today"
+            if d[:3] == yesterday[:3]:
+                return "Yesterday"
+            return time.strftime("%A %d %B" + (" %Y" if d.tm_year != today.tm_year else ""), d)
+
+        def add_line(text):
+            tk.Label(inner, text=text, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8)).pack(pady=(10, 2))
+
+        def add_bubble(m):
+            mine = m["sender"] != xuid
+            row = tk.Frame(inner, bg=pal["bg"])
+            row.pack(fill="x", padx=12, pady=3)
+            side = "e" if mine else "w"
+            b = tk.Label(row, text=m["text"], justify="left", anchor="w", font=("Segoe UI", 10),
+                         bg=pal["accent"] if mine else pal["friend"], fg=pal["bg"] if mine else pal["fg"],
+                         padx=12, pady=7, wraplength=max(160, int(canvas.winfo_width() * 0.62)))
+            b.pack(anchor=side)
+            if m["at"]:
+                tk.Label(row, text=time.strftime("%H:%M", time.localtime(m["at"])), bg=pal["bg"], fg=pal["muted"],
+                         font=("Segoe UI", 7)).pack(anchor=side, padx=4)
+            bubbles.append(b)
 
         def show(res, err):
             if not win.winfo_exists():
                 return
             if err:
                 return info.set(f"Could not load the messages: {err}")
-            log.configure(state="normal")
-            log.delete("1.0", "end")
+            for w in inner.winfo_children():
+                w.destroy()
+            bubbles.clear()
+            day = None
             for m in res["messages"]:
-                mine = m["sender"] != xuid
-                log.insert("end", ("You" if mine else gt), ("me",) if mine else ())
-                log.insert("end", f"  {fmt_ts(m['at']) if m['at'] else ''}\n", ("when",))
-                log.insert("end", m["text"] + "\n\n")
-            log.configure(state="disabled")
-            log.see("end")
+                d = day_label(m["at"]) if m["at"] else ""
+                if d and d != day:
+                    add_line(d)
+                    day = d
+                add_bubble(m)
+            if not res["messages"]:
+                add_line(f"No messages with {gt} yet. Say ahoy!")
             n = len(res["messages"])
-            info.set((f"{n} message(s) with {gt}" if n else f"No messages with {gt} yet")
-                     + (" (only the newest ones: OpenXBL can't fetch older ones)." if res["more"] else ".")
-                     + f" Sent from {self.xkey.active() or 'your account'}.")
+            info.set((f"{n} message(s)" if n else "no messages yet")
+                     + (" · only the newest (OpenXBL can't fetch older ones)" if res["more"] else "")
+                     + f" · as {self.xkey.active() or 'your account'}")
+            win.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.yview_moveto(1.0)
 
         def load():
             self._xbox_bg(lambda k: social.history(k, xuid), show)
@@ -643,15 +707,16 @@ class App(SharedListMixin):
                 if err:
                     return state.set(f"Not sent: {err}")
                 box.delete("1.0", "end")
-                state.set(f"Sent. 0 / {social.MAX_MESSAGE}")
+                state.set(hint)
                 self.set_status(f"Xbox message sent to {gt}.")
                 load()
             self._xbox_bg(lambda k: social.send_message(k, xuid, text), done)
         send_btn.configure(command=send)
         box.bind("<Control-Return>", lambda e: (send(), "break")[1])
-        win.send, win.box, win.log, win.info = send, box, log, info   # kept for tests
+        win.send, win.box, win.info = send, box, info              # kept for tests
+        win.texts = lambda: [b.cget("text") for b in bubbles]
         box.focus_set()
-        self._place_dialog(win, 620, 560)
+        self._place_dialog(win, 640, 620)
         load()
         return win
 
@@ -694,7 +759,7 @@ class App(SharedListMixin):
         ttk.Button(bar, text="Open SOTREP", command=lambda: with_one(
             lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"])))).pack(side="left", padx=4)
         ttk.Button(bar, text="Xbox profile", command=lambda: with_one(
-            lambda f: webbrowser.open(social.profile_url(f["gamertag"])))).pack(side="left", padx=(0, 4))
+            lambda f: self.open_xbox_profile(f["gamertag"], f["xuid"]))).pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="Remove friend", command=lambda: with_one(
             lambda f: self.remove_friend_selected(f["gamertag"], f["xuid"], after=load))).pack(side="left")
         ttk.Button(bar, text="Refresh", command=lambda: load()).pack(side="right")

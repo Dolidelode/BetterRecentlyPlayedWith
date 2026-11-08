@@ -139,5 +139,44 @@ def profile_url(gamertag: str) -> str:
     return "https://www.xbox.com/play/user/" + urllib.parse.quote(gamertag.strip())
 
 
+# The Xbox app (Microsoft.GamingApp) registers msxbox:, and Microsoft's own Game Bar widget opens profiles with
+# exactly this link. Found in the installed app's files; Microsoft does not document it, so the web page stays the
+# fallback.
+APP_PROFILE = "msxbox://profile?xuid={}"
+
+
+def xbox_app_installed() -> bool:
+    try:
+        import winreg
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "msxbox"))
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def open_profile(gamertag: str, xuid, start=None, web=None, installed=xbox_app_installed) -> str:
+    """Open the player's profile in the Xbox app when it is installed (by XUID), otherwise on xbox.com.
+    Returns "app" or "web"."""
+    x = _xuid(xuid)
+    if x and installed():
+        try:
+            (start or _start)(APP_PROFILE.format(x))
+            return "app"
+        except OSError:
+            pass
+    (web or _web)(profile_url(gamertag))
+    return "web"
+
+
+def _start(link):
+    import os
+    os.startfile(link)
+
+
+def _web(url):
+    import webbrowser
+    webbrowser.open(url)
+
+
 def friend_list(key: str, call: Call = None) -> List[dict]:
     return parse_friend_list((call or openxbl_call)("GET", FRIENDS_URL, key))

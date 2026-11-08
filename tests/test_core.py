@@ -544,8 +544,8 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     msg = app.message_dialog("Old", "1")
     settle()
     assert sent[-1] == ("GET", "messages/1", None)                         # the history with that player
-    assert "gg last night" in msg.log.get("1.0", "end") and "gone" not in msg.log.get("1.0", "end")
-    assert "1 message(s) with Old" in msg.info.get()
+    assert msg.texts() == ["gg last night"]                                 # deleted messages are left out
+    assert "1 message(s)" in msg.info.get()
     msg.box.insert("1.0", "Ahoy! Fancy a voyage?")
     msg.send()
     settle()

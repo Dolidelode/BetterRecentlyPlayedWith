@@ -66,3 +66,20 @@ def test_history_oldest_first_without_deleted_and_with_more_flag():
     with pytest.raises(ProviderError):
         social.parse_history({"content": {}})
     assert social.profile_url(" Salty Pirate ") == "https://www.xbox.com/play/user/Salty%20Pirate"
+
+
+def test_profile_opens_in_the_xbox_app_when_installed_else_on_the_web():
+    started, web = [], []
+    assert social.open_profile("Salty Pirate", "2535400000000001", start=started.append, web=web.append,
+                               installed=lambda: True) == "app"
+    assert started == ["msxbox://profile?xuid=2535400000000001"] and web == []
+
+    def broken(link):
+        raise OSError("no handler")
+    assert social.open_profile("Salty Pirate", "2535400000000001", start=broken, web=web.append,
+                               installed=lambda: True) == "web"
+    assert social.open_profile("Salty Pirate", "", start=started.append, web=web.append,
+                               installed=lambda: True) == "web"              # no XUID: the web page by gamertag
+    assert social.open_profile("Salty Pirate", "1", start=started.append, web=web.append,
+                               installed=lambda: False) == "web"
+    assert web == ["https://www.xbox.com/play/user/Salty%20Pirate"] * 3 and len(started) == 1
