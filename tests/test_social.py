@@ -100,5 +100,5 @@ def test_game_bar_social_widget_link():
 def test_xbox_sign_in_screen_link():
     started = []
     assert social.open_xbox_sign_in(start=started.append, installed=lambda: True)
-    assert started == ["msxbox://signIn/"]
+    assert started == [r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"]
     assert not social.open_xbox_sign_in(start=started.append, installed=lambda: False) and len(started) == 1

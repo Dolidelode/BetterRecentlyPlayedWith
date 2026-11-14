@@ -537,7 +537,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     signin = []
     monkeypatch.setattr(social, "open_xbox_sign_in", lambda: signin.append(1) or True)
     app.switch_game_bar()                                                    # Xbox sign-in screen + account copied
-    assert signin and root.clipboard_get() == app.xkey.active() and "Game Bar uses the same" in app.status.get()
+    assert signin and root.clipboard_get() == app.xkey.active() and "Game Bar uses the same sign-in" in app.status.get()
     app.add_friend_selected()
     settle()
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()
