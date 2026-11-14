@@ -563,6 +563,27 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert row[0] == "New" and row[1] == "Online" and row[2] == "Sea of Thieves" and "1 online" in fr.info.get()
     assert d.friend_relations("Main") == {"2": "Friend"}                     # the Friend highlight is refreshed too
     fr.destroy()
+    # Add account: Microsoft sign-in (the browser part is faked) becomes an account like a key; Remove forgets it
+    from brpw.msauth import MARK
+    dlg = app.set_key()
+    labels = [w.cget("text") for w in dlg.winfo_children() if isinstance(w, ttk.Button)]
+    assert labels[:2] == ["Sign in with Microsoft (recommended)", "Use an OpenXBL key instead..."]
+    dlg.destroy()
+    removed = []
+    app.msa.sign_in = lambda *a, **k: ("2535400000000777", "Dolly")
+    app.msa.remove = removed.append
+    app.refresh_now = lambda *a, **k: None
+    app.sign_in_microsoft()
+    end = _t.time() + 5
+    while "key" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.02)
+    assert app.xkey.active() == "Dolly" and app.xkey.get() == MARK + "2535400000000777"
+    assert "Dolly" in app.acct_box.cget("values")
+    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: True)
+    app.remove_account()
+    assert removed == ["2535400000000777"] and "Dolly" not in app.xkey.names()
+    app.xkey.set_active("Main")
     # "Guess Twitch": suggestions are only linked after the user confirms them
     app._on_twitch_guess([{"account_id": by["New2"], "gamertag": "New2", "id": "321", "login": "new2", "name": "New2",
                            "live": True, "game": "Sea of Thieves", "title": "t", "viewers": 4, "sot": True}], None)

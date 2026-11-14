@@ -9,6 +9,8 @@ from tkinter import ttk
 
 from . import sotrep
 from .paths import data_dir
+from . import direct
+from .msauth import MsAccounts
 from .providers import OpenXblKey, ProviderError, find_gamertag
 from .shared import SharedClient, SharedConfig, http_rest
 from .streamlog import POLL_EVERY, StreamLog, keep_awake
@@ -371,6 +373,7 @@ class StreamLogApp:
 
 def main():
     log = StreamLog(data_dir() / "stream_log.db")
+    direct.configure(MsAccounts(data_dir() / "ms_accounts.json"))    # accounts signed in with Microsoft
     root = tk.Tk()
     StreamLogApp(root, log, TwitchClient(TwitchCreds(data_dir() / "twitch.json")), SharedConfig(data_dir()),
                  OpenXblKey(data_dir() / "openxbl_keys.json"))

@@ -26,6 +26,9 @@ MAX_MESSAGE = 500          # keep messages short; Xbox rejects very long ones
 
 def openxbl_call(method: str, url: str, key: str, data: Optional[dict] = None, timeout: int = 20) -> dict:
     """One OpenXBL request with any HTTP method. Errors become ProviderError (with .code when there is one)."""
+    from . import direct
+    if direct.is_ms_key(key):                 # Microsoft sign-in: Xbox's own services instead of OpenXBL
+        return direct.call(method, url, key.strip(), data)
     h = {"User-Agent": UA, "Accept": "application/json", "X-Authorization": key.strip()}
     body = None
     if data is not None:

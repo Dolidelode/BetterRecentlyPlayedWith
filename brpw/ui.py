@@ -7,12 +7,13 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from . import __version__, social, sotrep, updater
+from . import __version__, direct, social, sotrep, updater
 from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
                         find_gamertag, lookup_gamertag)
 from .game import game_running
+from .msauth import MARK, MsAccounts
 from .shared import SharedConfig, http_rest
 from .shared_ui import SHARED_MARK, SharedListMixin
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
@@ -77,6 +78,8 @@ class App(SharedListMixin):
         self.root, self.db = root, db
         self.sync = SyncService(db)
         self.xkey = OpenXblKey(data_dir() / "openxbl_keys.json")
+        self.msa = MsAccounts(data_dir() / "ms_accounts.json")     # Microsoft sign-ins (refresh tokens, DPAPI)
+        direct.configure(self.msa)
         self.q: "queue.Queue" = queue.Queue()
         self.closing = False
         self.paused = db.get_setting("paused", "0") == "1"
@@ -1705,6 +1708,45 @@ class App(SharedListMixin):
         return OpenXblProvider(self.xkey) if self.xkey.get() else None
 
     def set_key(self):
+        """Add an Xbox account: Microsoft sign-in (recommended) or an OpenXBL key."""
+        win = tk.Toplevel(self.root)
+        win.title("Add Xbox account")
+        win.configure(bg=self.pal["bg"])
+        win.transient(self.root)
+        ttk.Button(win, text="Sign in with Microsoft (recommended)",
+                   command=lambda: (win.destroy(), self.sign_in_microsoft())).pack(fill="x", padx=16, pady=(16, 4))
+        ttk.Label(win, style="Hint.TLabel", wraplength=420, justify="left", text=(
+            "Opens Microsoft's own sign-in page in your browser; you type your password there, never in this app. "
+            "The app talks to Xbox directly: no xbl.io account or key, the game and time for each recent player, "
+            "and your full message inbox. The sign-in is saved encrypted for this Windows user only.")
+        ).pack(fill="x", padx=16)
+        ttk.Button(win, text="Use an OpenXBL key instead...",
+                   command=lambda: (win.destroy(), self.add_openxbl_key())).pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(win, style="Hint.TLabel", wraplength=420, justify="left", text=(
+            "The older way: a free key from xbl.io, a third-party service that talks to Xbox for you.")
+        ).pack(fill="x", padx=16)
+        ttk.Button(win, text="Cancel", command=win.destroy).pack(anchor="e", padx=16, pady=14)
+        self._place_dialog(win)
+        return win
+
+    def sign_in_microsoft(self):
+        if "key" in self.busy:
+            return
+        self.set_status("Sign in on Microsoft's page in your browser (choose the Xbox account to add)...")
+        self._set_busy("key", True)
+
+        def work():
+            try:
+                xuid, gamertag = self.msa.sign_in()
+                self.q.put(("acct_added", (gamertag or "Account", MARK + xuid)))
+            except ProviderError as e:
+                self.q.put(("acct_err", str(e)))
+            except Exception as e:                   # never let a worker thread die silently
+                self.q.put(("acct_err", f"Unexpected error: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def add_openxbl_key(self):
         webbrowser.open("https://xbl.io/dashboard")
         k = simpledialog.askstring(
             "OpenXBL key", "Sign in at xbl.io (opened in your browser) with your Microsoft account,\n"
@@ -1735,9 +1777,12 @@ class App(SharedListMixin):
         self.refresh_now(manual=True)
 
     def remove_account(self):
-        name = self.xkey.active()
-        if name and messagebox.askyesno("Remove account", f"Remove the saved key for '{name}'?\n"
+        name, key = self.xkey.active(), self.xkey.get()
+        what = "Microsoft sign-in" if direct.is_ms_key(key) else "key"
+        if name and messagebox.askyesno("Remove account", f"Remove the saved {what} for '{name}'?\n"
                                         "Your player history is kept."):
+            if direct.is_ms_key(key):
+                self.msa.remove(key[len(MARK):])
             self.xkey.remove(name)
             self._refresh_accounts()
             self.set_status(f"Removed {name}.")

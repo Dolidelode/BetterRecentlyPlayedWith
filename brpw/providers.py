@@ -134,6 +134,10 @@ def raise_for_body(payload):
 
 
 def openxbl_json(url, data=None, headers=None, form=False):
+    key = (headers or {}).get("X-Authorization", "")
+    if str(key).startswith("msa:"):            # Microsoft sign-in: Xbox's own services instead of OpenXBL
+        from . import direct
+        return direct.call("POST" if data is not None else "GET", url, key, data)
     return raise_for_body(http_json(url, data, headers, form))
 
 

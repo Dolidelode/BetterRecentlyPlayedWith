@@ -11,8 +11,8 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | Local history (SQLite), search, sorting, unique count, export CSV/JSON | Works, tested |
 | Tags (your own labels on players, searchable) and an Encounters view for one or several selected players | Works, tested |
 | **Import** gamertags (paste/file) | Works, tested. Marked "Import" in the list |
-| **Live** sync via OpenXBL | Uses OpenXBL's documented `GET /v2/recent-players` (third-party service, free key, 150 requests/hour). Parsed from its published spec; **not yet tested against a real account** |
-| What OpenXBL's list contains | Your **whole** Xbox Recently played with list (all games), without game names or times. The app can't filter to Sea of Thieves; "Last seen by app" is when the app first saw the player, and "Xbox list #" is the position in Xbox's list (1 = top, presumably the most recent). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
+| **Live** sync | Your Xbox **Recently played with** list, refreshed by itself. Two ways to connect: **Sign in with Microsoft** (recommended; the app asks Xbox directly) or an OpenXBL key (third-party service, free key, 150 requests/hour). Both tested against a real account |
+| What the list contains | With **Microsoft sign-in**, Xbox gives the game and the time you last played together, so the list is **only Sea of Thieves** and every encounter has its **real time**. With an OpenXBL key the list covers **all games**, without game names or times: "Last seen by app" is then when the app first saw the player. "Xbox list #" is the position in Xbox's list (1 = top). The default sort is Xbox list order, then players no longer in the list (newest first). Click any column header to sort; click again to reverse |
 | Friend highlight | Rows of players who are your friends (you follow each other) get a different colour. Uses your OpenXBL friends list (1 extra request per 30 min), matched by XUID, never by name. Switching account jumps back to the top of the list |
 | **Twitch icon** | Experimental. A Twitch icon appears on a player's row only while **Xbox itself** reports an active Twitch broadcast for that account. It checks the 20 most recent players automatically (one OpenXBL request each, max 30 per hour). No channel link or stream title is available, so none is shown. Not yet seen on a real broadcaster. See [docs/TWITCH_RESEARCH.md](docs/TWITCH_RESEARCH.md) |
 | **Twitch (optional)** | Save a player's Twitch channel once (copy the name from SOTREP); the app verifies it with Twitch to an exact channel ID and then checks live status for all saved channels in one request every 2 minutes: title, game, viewers, watch link. Needs your own free Twitch application keys, entered once and stored only on your PC. Tested against the real Twitch API |
@@ -28,12 +28,17 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 
 Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `openxbl_keys.json`), so updating or moving the exe never touches it.
 
-### Connecting (easiest: OpenXBL)
-1. Click **Add account...**, sign in at <https://xbl.io> with your Microsoft account (phone verification), copy your API key from the dashboard.
-2. Paste it into the app. The app looks up the gamertag and shows it under **Syncing as Xbox account**. Keys are stored in `openxbl_keys.json` in your app-data folder, never in the database.
-3. Several accounts: **Add account...** again for each one, pick the active one in the drop-down (switching refreshes at once) or **Remove** it. All accounts feed the same player history.
+### Connecting
+**Sign in with Microsoft (recommended)**
+1. Click **Add account...** → **Sign in with Microsoft**. Microsoft's own sign-in page opens in your browser: choose the Xbox account and sign in there. The app never sees your password.
+2. The account appears under **Syncing as Xbox account** and the app talks to Xbox directly: no xbl.io account, no key and no third party in between.
+3. The sign-in is saved in `ms_accounts.json` in your app-data folder, **encrypted with Windows** (only your Windows user on this PC can read it) and never in the database. **Remove** forgets it; you can also revoke the app at <https://account.live.com/consent/Manage>.
 
-OpenXBL is a third-party service: it sees your Xbox data when you sign in there. Use it only if you are comfortable with that. Disconnect any time with **Remove**.
+**Or: an OpenXBL key**
+1. Click **Add account...** → **Use an OpenXBL key instead...**, sign in at <https://xbl.io> with your Microsoft account (phone verification) and copy your API key from the dashboard.
+2. Paste it into the app. Keys are stored in `openxbl_keys.json` in your app-data folder, never in the database. OpenXBL is a third-party service: it sees your Xbox data when you sign in there.
+
+Several accounts: **Add account...** again for each one (both kinds can be mixed), pick the active one in the drop-down (switching refreshes at once) or **Remove** it. All accounts feed the same player history.
 
 ## Twitch (optional)
 Xbox only reports broadcasts that go through Xbox, so it misses most PC streamers. This section asks Twitch directly, for players whose channel **you** saved:
@@ -54,7 +59,7 @@ A small icon on a row means Xbox reports that player as broadcasting right now (
 Nine themes (top right) each pair an icon design with a full colour scheme for the whole window; the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
 
 ## Privacy
-Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to `api.xbl.io` (your list, using your own key), `api.github.com` and `github.com` (update check, and the download when you click Update now) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
+Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to Microsoft's sign-in (`login.microsoftonline.com`) and Xbox's own services (`*.xboxlive.com`) for accounts signed in with Microsoft, or to `api.xbl.io` for accounts with an OpenXBL key, `api.github.com` and `github.com` (update check, and the download when you click Update now) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `ms_accounts.json`, `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
 
 ## Development
 ```
