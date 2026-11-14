@@ -218,6 +218,7 @@ class App(SharedListMixin):
         self.acct_box.bind("<<ComboboxSelected>>", lambda e: self.switch_account())
         ttk.Button(acct, text="Add account...", command=self.set_key).pack(side="left")
         ttk.Button(acct, text="Remove", command=self.remove_account).pack(side="left", padx=4)
+        ttk.Button(acct, text="Switch Game Bar to this account", command=self.switch_game_bar).pack(side="left")
         ttk.Button(acct, text="Twitch setup...", command=self.twitch_setup_dialog).pack(side="right")
         ttk.Button(acct, text="Shared list...", command=self.shared_dialog).pack(side="right", padx=4)
         ttk.Button(acct, text="Live SoT streams", command=self.sot_streams).pack(side="right", padx=4)
@@ -413,7 +414,7 @@ class App(SharedListMixin):
              self.remove_friend_selected if following else self.add_friend_selected, xbox_ok),
             ("Xbox messages...", self.message_selected, xbox_ok),
             ("Open Xbox profile", self.xbox_profile_selected, one),
-            ("Invite / join (Game Bar)", self.invite_or_join, one),
+            ("Invite / join in Game Bar", self.invite_or_join, one),
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
@@ -579,6 +580,21 @@ class App(SharedListMixin):
         for i in self.tree.selection()[:5]:
             self.open_xbox_profile(self.tree.set(i, "gamertag"), self.tree.set(i, "xuid"))
 
+    def switch_game_bar(self):
+        """Game Bar uses the Xbox app's Windows sign-in, which only Microsoft's apps can change. Open the Xbox app's
+        sign-in screen and copy the selected account's gamertag; the user picks that account in Microsoft's picker."""
+        name = self.xkey.active()
+        if not name:
+            return self.set_status("Add an Xbox account first.", error=True)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(name)
+        if social.open_xbox_sign_in():
+            self.set_status(f"Xbox app sign-in opened ({name} copied). Pick {name} there: Game Bar uses the same "
+                            "sign-in. Accounts added in Windows Settings > Accounts > Email & accounts need no password.")
+        else:
+            self.set_status(f"Couldn't open the Xbox app ({name} copied). In the Xbox app, click your profile > "
+                            "Sign out, then sign in as {name}.".replace("{name}", name), error=True)
+
     def invite_or_join(self, gt=None):
         """Xbox only offers game invites and joining inside its own UI: open Game Bar's Xbox Social widget and put
         the gamertag on the clipboard to find the player there."""
@@ -622,7 +638,7 @@ class App(SharedListMixin):
         tk.Label(head, textvariable=info, bg=pal["head"], fg=pal["muted"], font=("Segoe UI", 9)).pack(side="left")
         ttk.Button(head, text="Xbox profile", command=lambda: self.open_xbox_profile(gt, xuid)).pack(
             side="right", padx=(4, 12))
-        ttk.Button(head, text="Invite / join", command=lambda: self.invite_or_join(gt)).pack(side="right")
+        ttk.Button(head, text="Invite / join in Game Bar", command=lambda: self.invite_or_join(gt)).pack(side="right")
 
         # scrollable message area: a frame inside a canvas, kept as wide as the canvas
         area = tk.Frame(win, bg=pal["bg"])
@@ -782,7 +798,7 @@ class App(SharedListMixin):
             lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"])))).pack(side="left", padx=4)
         ttk.Button(bar, text="Xbox profile", command=lambda: with_one(
             lambda f: self.open_xbox_profile(f["gamertag"], f["xuid"]))).pack(side="left", padx=(0, 4))
-        ttk.Button(bar, text="Invite / join", command=lambda: with_one(
+        ttk.Button(bar, text="Invite / join in Game Bar", command=lambda: with_one(
             lambda f: self.invite_or_join(f["gamertag"]))).pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="Remove friend", command=lambda: with_one(
             lambda f: self.remove_friend_selected(f["gamertag"], f["xuid"], after=load))).pack(side="left")

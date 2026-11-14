@@ -531,8 +531,13 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert items["Add Xbox friend"] and items["Xbox messages..."] and items["Open Xbox profile"]
     opened_bar = []
     monkeypatch.setattr(social, "open_gamebar_social", lambda: opened_bar.append(1) or True)
+    assert items["Invite / join in Game Bar"]
     app.invite_or_join()                                                     # Game Bar + gamertag on the clipboard
     assert opened_bar and root.clipboard_get() == "Old" and "Invite to game" in app.status.get()
+    signin = []
+    monkeypatch.setattr(social, "open_xbox_sign_in", lambda: signin.append(1) or True)
+    app.switch_game_bar()                                                    # Xbox sign-in screen + account copied
+    assert signin and root.clipboard_get() == app.xkey.active() and "Game Bar uses the same" in app.status.get()
     app.add_friend_selected()
     settle()
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()

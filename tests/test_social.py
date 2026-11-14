@@ -95,3 +95,10 @@ def test_game_bar_social_widget_link():
     def broken(link):
         raise OSError("no handler")
     assert not social.open_gamebar_social(start=broken, installed=lambda: True)
+
+
+def test_xbox_sign_in_screen_link():
+    started = []
+    assert social.open_xbox_sign_in(start=started.append, installed=lambda: True)
+    assert started == ["msxbox://signIn/"]
+    assert not social.open_xbox_sign_in(start=started.append, installed=lambda: False) and len(started) == 1

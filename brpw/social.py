@@ -167,6 +167,21 @@ def xbox_app_installed() -> bool:
 GAMEBAR_SOCIAL = "ms-gamebar://launchForeground/activate/Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"
 
 
+# The Xbox app's own sign-in screen (its jump list uses this link). Game Bar shares the Xbox app's Windows sign-in;
+# the app only opens the screen, the user picks the account there (Microsoft's account picker).
+XBOX_SIGN_IN = "msxbox://signIn/"
+
+
+def open_xbox_sign_in(start=None, installed=xbox_app_installed) -> bool:
+    if not installed():
+        return False
+    try:
+        (start or _start)(XBOX_SIGN_IN)
+        return True
+    except OSError:
+        return False
+
+
 def open_gamebar_social(start=None, installed=lambda: _registered("ms-gamebar")) -> bool:
     """Open Game Bar on the Xbox Social widget. False when Game Bar is missing or refused the link."""
     if not installed():
