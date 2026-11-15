@@ -597,6 +597,46 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     ib.query.set("ne")                                                       # filters by name
     assert [r[0] for r in ib.rows()] == ["New2"]
     ib.destroy()
+    # new messages: one pop-up per new message and a count on Messages (Microsoft sign-in accounts only)
+    from brpw.msauth import MARK as _MARK
+    news = [{"xuid": "1", "gamertag": "Old", "state": "Online", "text": "", "preview": "you up?", "mine": False,
+             "at": _t.time() + 100, "unread": True}]
+    asked_unread = []
+    monkeypatch.setattr(social, "unread_chats", lambda key: asked_unread.append(key) or [dict(c) for c in news])
+
+    def msg_round():
+        app._messages_round()
+        end = _t.time() + 5
+        while app.msg_busy and _t.time() < end:
+            root.update()
+            _t.sleep(0.02)
+        root.update()
+    msg_round()
+    assert asked_unread == [] and app.toast is None                          # an OpenXBL key: never asked
+    real_get = app.xkey.get
+    app.xkey.get = lambda: _MARK + "2535400000000777"
+    msg_round()
+    toast = app.toast
+    assert toast.winfo_exists() and "Old" in toast.title_text and toast.body_text == "you up?"
+    assert app.msg_btn.cget("text") == "Messages (1)"
+    msg_round()                                                              # the same message: no second pop-up
+    assert app.toast is toast and len(asked_unread) == 2
+    toast.click()                                                            # opens Messages at that chat
+    settle()
+    root.update()
+    settle()
+    assert not toast.winfo_exists() and app.inbox_win.panel is not None
+    assert app.msg_btn.cget("text") == "Messages"                            # read here: the count is gone
+    assert app.inbox_dialog() is app.inbox_win                               # one Messages window
+    app.inbox_win.destroy()
+    app.msg_popups.set(False)
+    app.set_message_popups()
+    assert d.get_setting("message_popups") == "0"
+    news[0]["at"] = _t.time() + 200
+    before = len(asked_unread)
+    msg_round()
+    assert len(asked_unread) == before and app.msg_after_id                  # off: not asked (but still scheduled)
+    app.xkey.get = real_get
     # Add account: Microsoft sign-in (the browser part is faked) becomes an account like a key; Remove forgets it
     from brpw.msauth import MARK
     dlg = app.set_key()

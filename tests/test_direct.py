@@ -72,7 +72,7 @@ def test_every_openxbl_address_maps_to_the_xbox_service(routed):
         ("GET", "https://peoplehub.xboxlive.com/users/me/people/social/decoration/presencedetail", "5"),
         ("PUT", f"https://social.xboxlive.com/users/xuid({XUID})/people/xuid(123)", "2"),
         ("DELETE", f"https://social.xboxlive.com/users/xuid({XUID})/people/xuid(123)", "2"),
-        ("POST", "https://xblmessaging.xboxlive.com/network/Xbox/users/me/conversations/users/xuid(123)", "1"),
+        ("POST", f"https://msg.xboxlive.com/users/xuid({XUID})/outbox", "3"),
         ("GET", "https://xblmessaging.xboxlive.com/network/Xbox/users/me/conversations/users/xuid(123)?maxItems=100",
          "1"),
         ("GET", "https://peoplehub.xboxlive.com/users/me/people/search?q=Salty&maxItems=15", "5"),
@@ -80,7 +80,7 @@ def test_every_openxbl_address_maps_to_the_xbox_service(routed):
                 "detail,presenceDetail,multiplayerSummary", "5"),
         ("GET", "https://userpresence.xboxlive.com/users/xuid(1)?level=all", "3"),
         ("GET", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag", "2")]
-    assert seen[3][3] == {"parts": [{"contentType": "text", "version": 0, "text": "ahoy"}]}
+    assert seen[3][3] == {"header": {"recipients": [{"xuid": 123}]}, "messageText": "ahoy"}
     with pytest.raises(ProviderError):
         providers.openxbl_json("https://api.xbl.io/v2/clubs", None, {"X-Authorization": key})
 

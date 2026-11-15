@@ -6,8 +6,8 @@ which asks the matching Xbox service and returns the answer in the shape OpenXBL
 layer over these same services, so most answers are identical; recent players gain the game and the time.
 
 Shapes checked against a real account: peoplehub (recent players, friends, people by XUID, search), userpresence,
-profile, xblmessaging (inbox, conversation). Adding/removing friends and sending messages use the services the Xbox
-app uses for that.
+profile, xblmessaging (inbox, conversation). Adding/removing friends uses the service the Xbox app uses for that.
+Sending messages uses Microsoft's documented outbox (see call()).
 """
 import json
 import re
@@ -60,7 +60,7 @@ def _request(method: str, url: str, auth: str, version: str, data=None, timeout:
         if e.code == 429:
             msg = "Xbox is rate limiting this account right now. Wait a few minutes; the app retries by itself."
         elif e.code in (401, 403):
-            msg = f"Xbox refused the request (HTTP {e.code}). If it keeps happening, sign in again."
+            msg = f"Xbox refused the request (HTTP {e.code}). If it keeps happening, sign in again. {detail}".strip()
         else:
             msg = f"HTTP {e.code} from {urllib.parse.urlparse(url).netloc}. {detail}".strip()
         err = ProviderError(msg, reauth=e.code == 401)
@@ -132,10 +132,13 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
     if m == "GET" and path in ("conversations", "messages"):
         return {"content": _request("GET", f"{MESSAGING}/inbox", auth, "1")}
     if m == "POST" and path == "conversations" and isinstance(data, dict):
+        # Microsoft's documented send API (msg.xboxlive.com outbox). The messaging service the Xbox app uses
+        # (xblmessaging) answers with a message ID but never delivers messages from this kind of sign-in; the
+        # outbox does (tested for real 2026-11-15: the message appeared in the conversation).
         x = str(data.get("xuid") or "")
         if not x.isdigit():
             raise ProviderError("No XUID for the message.")
-        _request("POST", f"{MESSAGING}/conversations/users/xuid({x})", auth, "1",
-                 {"parts": [{"contentType": "text", "version": 0, "text": str(data.get("message") or "")}]})
+        _request("POST", f"https://msg.xboxlive.com/users/xuid({tok['xuid']})/outbox", auth, "3",
+                 {"header": {"recipients": [{"xuid": int(x)}]}, "messageText": str(data.get("message") or "")})
         return {}
     raise ProviderError(f"'{path}' isn't available with Microsoft sign-in yet.")

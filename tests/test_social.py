@@ -153,6 +153,11 @@ def test_inbox_lists_chats_newest_first_with_names(monkeypatch):
     with pytest.raises(ProviderError) as e:
         social.inbox("plain-openxbl-key", call=call)                    # OpenXBL's inbox answers 405
     assert "signed in with Microsoft" in str(e.value)
+    seen.clear()
+    unread = social.unread_chats(MARK + me, call=call)                  # only theirs and unread, names for those
+    assert [(c["gamertag"], c["preview"]) for c in unread] == [("Player12", "ahoy!")]
+    assert seen == ["conversations", "player/summary/12"]
+    assert social.unread_chats("plain-openxbl-key", call=call) == []    # OpenXBL: never asked
 
 
 def test_profiles_ask_ten_players_per_request():

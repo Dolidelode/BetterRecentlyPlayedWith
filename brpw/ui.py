@@ -26,6 +26,7 @@ MIN_INTERVAL = 30
 REFRESH_MODES = ("Only while SoT is open", "Always", "Off")
 XBOX_MODE = "While Xbox says I play SoT"     # your own Xbox presence: also counts Sea of Thieves on a console
 PRESENCE_EVERY = 120                         # seconds between those presence checks (OpenXBL's hourly budget)
+MESSAGES_EVERY = 60                          # seconds between checks for new Xbox messages (Microsoft sign-in)
 
 
 class _MemCreds:
@@ -127,6 +128,13 @@ class App(SharedListMixin):
         self.shared_http = http_rest       # replaced in tests
         self.shared_after_id = None
         self.shared_busy = False
+        self.msg_after_id = None                 # new-message pop-ups (Microsoft sign-in accounts only)
+        self.msg_busy = False
+        self.msg_seen = {}                       # key -> {xuid: time of the newest message already announced}
+        self.msg_opened = {}                     # xuid -> when its chat was last opened here
+        self.msg_unread = []                     # unread chats not opened here yet (the Messages button count)
+        self.toast = None
+        self.inbox_win = None
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.reload()
@@ -135,6 +143,7 @@ class App(SharedListMixin):
         self._schedule_live(15_000)
         self._schedule_twitch(20_000)
         self._schedule_shared(10_000)
+        self._schedule_messages(8_000)
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         updater.cleanup(updater.running_exe())                 # the old program file of a finished update
@@ -266,7 +275,11 @@ class App(SharedListMixin):
         self.menu_btn.pack(side="right", padx=(4, 0))
         for text, cmd in (("Live streams", self.sot_streams), ("Check live", self.check_live_all),
                           ("Messages", self.inbox_dialog), ("Friends", self.friends_dialog)):
-            ttk.Button(bar, text=text, style="Tool.TButton", command=cmd).pack(side="right", padx=2)
+            b = ttk.Button(bar, text=text, style="Tool.TButton", command=cmd)
+            b.pack(side="right", padx=2)
+            if text == "Messages":
+                self.msg_btn = b
+        self.msg_popups = tk.BooleanVar(value=self.db.get_setting("message_popups", "1") == "1")
         self._refresh_accounts()
 
         self.players_tab = ttk.Frame(r)
@@ -542,6 +555,8 @@ class App(SharedListMixin):
         m.add_command(label="Add Xbox account...", command=self.set_key)
         m.add_command(label="Remove this account", command=self.remove_account, state=has)
         m.add_command(label="Switch Game Bar to this account", command=self.switch_game_bar, state=has)
+        m.add_checkbutton(label="Pop-up for new Xbox messages", variable=self.msg_popups,
+                          command=self.set_message_popups)
         m.add_separator()
         m.add_command(label="Import players...", command=self.import_dialog)
         m.add_command(label="Export...", command=self.export)
@@ -792,6 +807,7 @@ class App(SharedListMixin):
                 return
             if err:
                 return info.set(f"Could not load the messages: {err}")
+            self._chat_opened(xuid)
             for w in inner.winfo_children():
                 w.destroy()
             bubbles.clear()
@@ -840,12 +856,20 @@ class App(SharedListMixin):
         load()
         return panel
 
-    def inbox_dialog(self):
+    def inbox_dialog(self, goto=None):
         """Messages: all your Xbox conversations on the left (newest first, unread marked, who is online), the chat
         with the selected one on the right. Typing filters by name; Enter finds anyone on Xbox to start a new chat.
         Needs an account signed in with Microsoft (OpenXBL's inbox endpoints don't work)."""
+        if self.inbox_win is not None and self.inbox_win.winfo_exists():    # one Messages window: bring it up
+            w = self.inbox_win
+            w.deiconify()
+            w.lift()
+            w.focus_force()
+            w.goto(goto)
+            return w
         P = self.pal
         win = tk.Toplevel(self.root)
+        self.inbox_win = win
         win.title("Messages")
         win.configure(bg=P["bg"])
         head = tk.Frame(win, bg=P["head"])
@@ -885,7 +909,7 @@ class App(SharedListMixin):
         empty.pack(expand=True)
 
         chats, rows, state = [], {}, {"results": None, "term": "", "placeholder": False, "panel": None,
-                                      "open": None}
+                                      "open": None, "goto": goto}
         hint = "Search chats, or Enter to find anyone on Xbox"
 
         def typed():
@@ -1014,10 +1038,21 @@ class App(SharedListMixin):
             if res["groups"]:
                 info.set(info.get() + f" · {res['groups']} group chat(s) not shown")
             render()
+            if state["goto"]:                                  # opened from a pop-up: show that chat
+                for iid, c in rows.items():
+                    if c["xuid"] == state["goto"]:
+                        tv.selection_set(iid)
+                        tv.see(iid)
+                        break
+                state["goto"] = None
 
         def load():
             self._xbox_bg(social.inbox, show)
 
+        def goto_chat(xuid):
+            state["goto"] = xuid
+            load()
+        win.goto = goto_chat
         placeholder(True)
         win.inbox_tv, win.info, win.query, win.search, win.entry = tv, info, query, search, entry   # for tests
         win.rows = lambda: [(tv.item(i, "text").strip(" ●"), tv.item(i, "values")[0]) for i in rows]
@@ -2099,6 +2134,9 @@ class App(SharedListMixin):
         self.to_top_after_sync = True
         self.reload(to_top=True)
         self.set_status(f"Switched to {self.xkey.active()}. Refreshing...")
+        self.msg_unread = []
+        self._update_msg_button()
+        self._schedule_messages(3_000)
         self.refresh_now(manual=True)
 
     def remove_account(self):
@@ -2124,6 +2162,152 @@ class App(SharedListMixin):
             self.twitch_check_now(manual=False)
         self._set_busy("sync", True)
         self.sync.run_async(prov, lambda out: self.q.put(("sync", out)))
+
+    # ---- new Xbox messages: a pop-up and a count on the Messages button (Microsoft sign-in only) ----
+    def set_message_popups(self):
+        on = bool(self.msg_popups.get())
+        self.db.set_setting("message_popups", "1" if on else "0")
+        if on:
+            self._schedule_messages(1_000)
+        else:
+            self.msg_unread = []
+            self._update_msg_button()
+        self.set_status("New Xbox messages pop up now (checked every minute, Microsoft sign-in accounts)." if on
+                        else "No pop-ups for new Xbox messages.")
+
+    def _schedule_messages(self, ms=None):
+        if self.msg_after_id:
+            self.root.after_cancel(self.msg_after_id)
+            self.msg_after_id = None
+        if not self.closing:
+            self.msg_after_id = self.root.after(ms or MESSAGES_EVERY * 1000, self._messages_round)
+
+    def _messages_round(self):
+        """Ask Xbox for unread conversations (one request, plus names for the unread ones) and announce new ones."""
+        self.msg_after_id = None
+        key = self.xkey.get()
+        if self.msg_popups.get() and direct.is_ms_key(key) and not self.msg_busy:
+            self.msg_busy = True
+
+            def work():
+                try:
+                    chats, err = social.unread_chats(key), None
+                except ProviderError as e:
+                    chats, err = None, str(e)
+                except Exception as e:                   # never let a worker thread die silently
+                    chats, err = None, f"Unexpected error: {e}"
+                self.q.put(("call", lambda: self._after_messages(key, chats, err)))
+            threading.Thread(target=work, daemon=True).start()
+        self._schedule_messages()
+
+    def _after_messages(self, key, chats, err):
+        self.msg_busy = False
+        if err or chats is None or self.closing or key != self.xkey.get() or not self.msg_popups.get():
+            return                                       # quiet: the next round tries again
+        seen = self.msg_seen.setdefault(key, {})
+        new = [c for c in chats if (c["at"] or 0) > seen.get(c["xuid"], 0)
+               and (c["at"] or 0) > self.msg_opened.get(c["xuid"], 0)]
+        for c in chats:
+            seen[c["xuid"]] = max(seen.get(c["xuid"], 0), c["at"] or 0)
+        self.msg_unread = [c for c in chats if (c["at"] or 0) > self.msg_opened.get(c["xuid"], 0)]
+        self._update_msg_button()
+        if new:
+            self._message_popup(new)
+
+    def _chat_opened(self, xuid):
+        # at least the newest known message's own time, so a PC clock behind Xbox's still clears it
+        self.msg_opened[xuid] = max([time.time()] + [c["at"] or 0 for c in self.msg_unread if c["xuid"] == xuid])
+        self.msg_unread = [c for c in self.msg_unread if c["xuid"] != xuid]
+        self._update_msg_button()
+
+    def _update_msg_button(self):
+        n = len(self.msg_unread)
+        self.msg_btn.configure(text=f"Messages ({n})" if n else "Messages",
+                               style="Accent.TButton" if n else "Tool.TButton")
+
+    def _message_popup(self, new):
+        if len(new) == 1:
+            c = new[0]
+            name = c["gamertag"] if not c["gamertag"].isdigit() else "Someone"
+            text = (c.get("preview") or "").replace("\n", " ")
+            title, body, goto = name, text[:140] + ("…" if len(text) > 140 else ""), c["xuid"]
+        else:
+            names = [c["gamertag"] for c in new if not c["gamertag"].isdigit()]
+            title = f"{len(new)} new Xbox messages"
+            body = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+            goto = None
+        return self._toast("✉  " + title, body, lambda: self.inbox_dialog(goto=goto))
+
+    def _toast(self, title, text, on_click, seconds=12):
+        """A small window at the bottom right of the screen, above other windows, that closes by itself. Clicking it
+        runs on_click; ✕ only closes it. While the mouse is over it, it stays."""
+        P = self.pal
+        if self.toast is not None and self.toast.winfo_exists():
+            self.toast.destroy()
+        t = tk.Toplevel(self.root)
+        t.withdraw()
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=P["accent"])
+        inner = tk.Frame(t, bg=P["head"])
+        inner.pack(fill="both", expand=True, padx=(4, 1), pady=1)
+        head = tk.Label(inner, text=title, bg=P["head"], fg=P["fg"], font=("Segoe UI", 11, "bold"), anchor="w")
+        head.pack(fill="x", padx=(14, 34), pady=(10, 2))
+        body = tk.Label(inner, text=text, bg=P["head"], fg=P["fg"], font=("Segoe UI", 10), justify="left",
+                        anchor="w", wraplength=320)
+        body.pack(fill="x", padx=14)
+        foot = tk.Label(inner, text="Click to open Messages", bg=P["head"], fg=P["muted"], font=("Segoe UI", 8),
+                        anchor="w")
+        foot.pack(fill="x", padx=14, pady=(4, 10))
+        close = tk.Label(inner, text="✕", bg=P["head"], fg=P["muted"], font=("Segoe UI", 10), cursor="hand2")
+        close.place(relx=1.0, x=-10, y=8, anchor="ne")
+        state = {"job": None}
+
+        def shut(_=None):
+            if t.winfo_exists():
+                t.destroy()
+
+        def click(_=None):
+            shut()
+            on_click()
+
+        def later(ms):
+            if state["job"]:
+                t.after_cancel(state["job"])
+            state["job"] = t.after(ms, shut)
+
+        def hold(_=None):
+            if state["job"]:
+                t.after_cancel(state["job"])
+                state["job"] = None
+        for w in (t, inner, head, body, foot):
+            w.bind("<Button-1>", click)
+            w.configure(cursor="hand2")
+        close.bind("<Button-1>", lambda e: (shut(), "break")[1])
+        t.bind("<Enter>", hold)
+        t.bind("<Leave>", lambda e: later(4_000))
+        t.update_idletasks()
+        w, h = max(360, t.winfo_reqwidth()), t.winfo_reqheight()
+        right, bottom = self.root.winfo_screenwidth(), self.root.winfo_screenheight() - 48
+        try:                                             # the screen without the taskbar
+            import ctypes
+            from ctypes import wintypes
+            area = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(area), 0):
+                right, bottom = area.right, area.bottom
+        except (AttributeError, OSError, ImportError, ValueError):
+            pass
+        t.geometry(f"{w}x{h}+{right - w - 16}+{bottom - h - 16}")
+        t.deiconify()
+        later(seconds * 1000)
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (ImportError, RuntimeError):
+            pass
+        t.title_text, t.body_text, t.click = title, text, click     # for tests
+        self.toast = t
+        return t
 
     def _schedule(self):
         if self.after_id:
@@ -2355,6 +2539,9 @@ class App(SharedListMixin):
         if self.shared_after_id:
             self.root.after_cancel(self.shared_after_id)
             self.shared_after_id = None
+        if self.msg_after_id:
+            self.root.after_cancel(self.msg_after_id)
+            self.msg_after_id = None
         if self.after_id:
             self.root.after_cancel(self.after_id)
             self.after_id = None

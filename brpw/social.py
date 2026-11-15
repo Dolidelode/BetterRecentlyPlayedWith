@@ -21,7 +21,7 @@ from .providers import UA, ProviderError, _iso_to_epoch, _xuid, raise_for_body
 API = "https://api.xbl.io/v2/"
 FRIENDS_URL = API + "friends"
 MESSAGE_URL = API + "conversations"
-MAX_MESSAGE = 500          # keep messages short; Xbox rejects very long ones
+MAX_MESSAGE = 250          # the limit of Xbox's documented send API (msg.xboxlive.com outbox)
 
 
 def openxbl_call(method: str, url: str, key: str, data: Optional[dict] = None, timeout: int = 20) -> dict:
@@ -276,6 +276,21 @@ def inbox(key: str, call: Call = None) -> dict:
     for c in res["chats"]:
         c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": ""}, preview=c["text"])
     return res
+
+
+def unread_chats(key: str, call: Call = None) -> List[dict]:
+    """Conversations whose newest message is from the other player and unread on Xbox, newest first, with names.
+    One inbox request, plus one per 10 unread players for the names. Microsoft sign-in only (see inbox)."""
+    from . import direct
+    from .msauth import MARK
+    if not direct.is_ms_key(key):
+        return []
+    res = parse_inbox((call or openxbl_call)("GET", API + "conversations", key), key.strip()[len(MARK):])
+    out = [c for c in res["chats"] if c["unread"] and not c["mine"]]
+    names = profiles(key, [c["xuid"] for c in out], call) if out else {}
+    for c in out:
+        c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": ""}, preview=c["text"])
+    return out
 
 
 SOT_TITLE_ID = "1717113201"
