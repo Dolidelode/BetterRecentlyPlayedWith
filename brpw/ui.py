@@ -187,6 +187,14 @@ class App(SharedListMixin):
                          lightcolor=HEAD, darkcolor=HEAD, gripcount=0)
             st.map(sb, background=[("disabled", PANEL), ("active", acc), ("pressed", acc)],   # disabled: all fits
                    arrowcolor=[("disabled", P["muted"])])
+        # the Messages list: a tree (name + preview line) without the expand arrows
+        st.configure("Inbox.Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=24,
+                     borderwidth=0, indent=0)
+
+        def no_arrow(layout):
+            return [(n, {**o, "children": no_arrow(o["children"])} if "children" in o else o)
+                    for n, o in layout if n != "Treeitem.indicator"]
+        st.layout("Inbox.Treeview.Item", no_arrow(st.layout("Treeview.Item")))
         # every window, now and later, gets a title bar in the theme's colours
         for cls in ("Tk", "Toplevel"):                         # the main window and every dialog, when shown
             r.bind_class(cls, "<Map>", lambda e: theme_titlebar(e.widget, P)
@@ -249,7 +257,7 @@ class App(SharedListMixin):
         self.menu_btn = ttk.Button(bar, text="☰", width=3, style="Tool.TButton", command=self._main_menu)
         self.menu_btn.pack(side="right", padx=(4, 0))
         for text, cmd in (("Live streams", self.sot_streams), ("Check live", self.check_live_all),
-                          ("Friends", self.friends_dialog)):
+                          ("Messages", self.inbox_dialog), ("Friends", self.friends_dialog)):
             ttk.Button(bar, text=text, style="Tool.TButton", command=cmd).pack(side="right", padx=2)
         self._refresh_accounts()
 
@@ -677,13 +685,23 @@ class App(SharedListMixin):
         self.message_dialog(*p)
 
     def message_dialog(self, gt, xuid):
-        """Chat with one player: your Xbox message history as bubbles (yours right, theirs left) and a box to
-        write a new one. Nothing is sent until Send (or Ctrl+Enter)."""
-        pal = self.pal
+        """Chat with one player in its own window (see _chat_panel)."""
         win = tk.Toplevel(self.root)
         win.title(f"Messages: {gt}")
-        win.configure(bg=pal["bg"])
-        head = tk.Frame(win, bg=pal["head"])
+        win.configure(bg=self.pal["bg"])
+        panel = self._chat_panel(win, gt, xuid)
+        panel.pack(fill="both", expand=True)
+        win.send, win.box, win.info, win.texts = panel.send, panel.box, panel.info, panel.texts   # kept for tests
+        panel.box.focus_set()
+        self._place_dialog(win, 640, 620)
+        return win
+
+    def _chat_panel(self, parent, gt, xuid, on_sent=None):
+        """Your Xbox message history with one player as bubbles (yours right, theirs left) and a box to write a new
+        one. Nothing is sent until Send (or Ctrl+Enter). Used by the chat window and the Messages window."""
+        pal = self.pal
+        panel = tk.Frame(parent, bg=pal["bg"])
+        head = tk.Frame(panel, bg=pal["head"])
         head.pack(fill="x")
         tk.Label(head, text=gt, bg=pal["head"], fg=pal["fg"], font=("Segoe UI", 13, "bold")).pack(
             side="left", padx=(14, 6), pady=10)
@@ -695,7 +713,7 @@ class App(SharedListMixin):
                    command=lambda: self.invite_or_join(gt)).pack(side="right")
 
         # scrollable message area: a frame inside a canvas, kept as wide as the canvas
-        area = tk.Frame(win, bg=pal["bg"])
+        area = tk.Frame(panel, bg=pal["bg"])
         area.pack(fill="both", expand=True)
         canvas = tk.Canvas(area, bg=pal["bg"], highlightthickness=0)
         sb = ttk.Scrollbar(area, orient="vertical", command=canvas.yview)
@@ -715,9 +733,11 @@ class App(SharedListMixin):
 
         def wheel(e):
             canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
-        win.bind("<MouseWheel>", wheel)
+        # the wheel scrolls the chat only while the mouse is over it (a list next to it keeps its own scrolling)
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
-        compose = tk.Frame(win, bg=pal["panel"])
+        compose = tk.Frame(panel, bg=pal["panel"])
         compose.pack(fill="x")
         send_btn = ttk.Button(compose, text="Send", width=8, style="Accent.TButton")
         send_btn.pack(side="right", padx=(0, 12), pady=10)             # packed first so the box can't squeeze it
@@ -726,7 +746,7 @@ class App(SharedListMixin):
         box.pack(side="left", fill="both", expand=True, padx=(12, 8), pady=10)
         state = tk.StringVar()
         hint = f"Ctrl+Enter sends · at most {social.MAX_MESSAGE} characters · non-friends get it as a message request"
-        tk.Label(win, textvariable=state, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8), anchor="w").pack(
+        tk.Label(panel, textvariable=state, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8), anchor="w").pack(
             fill="x", padx=12, pady=(0, 6))
         state.set(hint)
         box.bind("<KeyRelease>", lambda e: state.set(
@@ -760,7 +780,7 @@ class App(SharedListMixin):
             bubbles.append(b)
 
         def show(res, err):
-            if not win.winfo_exists():
+            if not panel.winfo_exists():
                 return
             if err:
                 return info.set(f"Could not load the messages: {err}")
@@ -778,9 +798,9 @@ class App(SharedListMixin):
                 add_line(f"No messages with {gt} yet. Say ahoy!")
             n = len(res["messages"])
             info.set((f"{n} message(s)" if n else "no messages yet")
-                     + (" · only the newest (OpenXBL can't fetch older ones)" if res["more"] else "")
+                     + (" · only the newest (older ones can't be fetched)" if res["more"] else "")
                      + f" · as {self.xkey.active() or 'your account'}")
-            win.update_idletasks()
+            panel.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))
             canvas.yview_moveto(1.0)
 
@@ -793,7 +813,7 @@ class App(SharedListMixin):
             state.set("Sending...")
 
             def done(_, err):
-                if not win.winfo_exists():
+                if not panel.winfo_exists():
                     return self.set_status(f"Message to {gt}: {'failed: ' + err if err else 'sent.'}", error=bool(err))
                 send_btn.state(["!disabled"])
                 if err:
@@ -802,13 +822,200 @@ class App(SharedListMixin):
                 state.set(hint)
                 self.set_status(f"Xbox message sent to {gt}.")
                 load()
+                if on_sent:
+                    on_sent()
             self._xbox_bg(lambda k: social.send_message(k, xuid, text), done)
         send_btn.configure(command=send)
         box.bind("<Control-Return>", lambda e: (send(), "break")[1])
-        win.send, win.box, win.info = send, box, info              # kept for tests
-        win.texts = lambda: [b.cget("text") for b in bubbles]
-        box.focus_set()
-        self._place_dialog(win, 640, 620)
+        panel.send, panel.box, panel.info, panel.load = send, box, info, load
+        panel.texts = lambda: [b.cget("text") for b in bubbles]
+        load()
+        return panel
+
+    def inbox_dialog(self):
+        """Messages: all your Xbox conversations on the left (newest first, unread marked, who is online), the chat
+        with the selected one on the right. Typing filters by name; Enter finds anyone on Xbox to start a new chat.
+        Needs an account signed in with Microsoft (OpenXBL's inbox endpoints don't work)."""
+        P = self.pal
+        win = tk.Toplevel(self.root)
+        win.title("Messages")
+        win.configure(bg=P["bg"])
+        head = tk.Frame(win, bg=P["head"])
+        head.pack(fill="x")
+        top = tk.Frame(head, bg=P["head"])
+        top.pack(fill="x", padx=14, pady=(12, 6))
+        tk.Label(top, text="Messages", bg=P["head"], fg=P["fg"], font=("Segoe UI", 14, "bold")).pack(side="left")
+        info = tk.StringVar(value="Loading your inbox...")
+        tk.Label(top, textvariable=info, bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
+                                                                                                 padx=(10, 0))
+        ttk.Button(top, text="↻  Refresh", style="Tool.TButton", command=lambda: load()).pack(side="right")
+
+        body = tk.Frame(win, bg=P["bg"])
+        body.pack(fill="both", expand=True)
+        left = tk.Frame(body, bg=P["panel"], width=330)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        query = tk.StringVar()
+        entry = ttk.Entry(left, textvariable=query, font=("Segoe UI", 10))
+        entry.pack(fill="x", padx=10, pady=10)
+        lst = tk.Frame(left, bg=P["panel"])
+        lst.pack(fill="both", expand=True)
+        tv = ttk.Treeview(lst, columns=("when",), show="tree", selectmode="browse", style="Inbox.Treeview")
+        tv.column("#0", width=250)
+        tv.column("when", width=62, anchor="e", stretch=False)
+        tv.tag_configure("unread", foreground=P["fg"], font=("Segoe UI", 9, "bold"))
+        tv.tag_configure("read", foreground=P["fg"])
+        tv.tag_configure("preview", foreground=P["muted"], font=("Segoe UI", 8))
+        tv.tag_configure("section", foreground=P["muted"], font=("Segoe UI", 8, "bold"))
+        sb = ttk.Scrollbar(lst, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        right = tk.Frame(body, bg=P["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        empty = tk.Label(right, text="Pick a conversation", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 11))
+        empty.pack(expand=True)
+
+        chats, rows, state = [], {}, {"results": None, "term": "", "placeholder": False, "panel": None,
+                                      "open": None}
+        hint = "Search chats, or Enter to find anyone on Xbox"
+
+        def typed():
+            return "" if state["placeholder"] else query.get().strip()
+
+        def when(ts):
+            if not ts:
+                return ""
+            d, now = time.localtime(ts), time.localtime()
+            if d[:3] == now[:3]:
+                return time.strftime("%H:%M", d)
+            if time.time() - ts < 6 * 86400:
+                return time.strftime("%a", d)
+            return time.strftime("%d %b" + (" %Y" if d.tm_year != now.tm_year else ""), d)
+
+        def add_chat(c):
+            online = c.get("state", "").casefold() == "online"
+            name = c["gamertag"] if not c["gamertag"].isdigit() else f"Unknown player ({c['gamertag']})"
+            iid = tv.insert("", "end", text=("●  " if online else "    ") + name, values=(when(c.get("at")),),
+                            tags=("unread" if c.get("unread") else "read",), open=True)
+            preview = (("You: " if c.get("mine") else "") + (c.get("preview") or "")).replace("\n", " ")
+            if preview:
+                tv.insert(iid, "end", text="     " + preview[:46] + ("…" if len(preview) > 46 else ""),
+                          tags=("preview",))
+            rows[iid] = c
+
+        def render():
+            tv.delete(*tv.get_children())
+            rows.clear()
+            q = " ".join(typed().casefold().split())
+            shown = [c for c in chats if not q or q in c["gamertag"].casefold()]
+            for c in shown:
+                add_chat(c)
+            if state["results"] is not None:
+                tv.insert("", "end", text=f"NEW CHAT — \"{state['term']}\"", tags=("section",))
+                have = {c["xuid"] for c in chats}
+                extra = [dict(r, preview="", at=None, mine=False, unread=False) for r in state["results"]
+                         if r["xuid"] not in have]
+                for c in extra:
+                    add_chat(c)
+                if not extra:
+                    tv.insert("", "end", text="    nobody else found", tags=("preview",))
+            elif q and not shown:
+                tv.insert("", "end", text="    no chat matches: Enter searches Xbox", tags=("preview",))
+            if state["open"]:                                  # keep the open conversation selected
+                for iid, c in rows.items():
+                    if c["xuid"] == state["open"]:
+                        tv.selection_set(iid)
+                        tv.see(iid)
+                        break
+
+        def open_chat(c):
+            if state["open"] == c["xuid"] and state["panel"] is not None:
+                return
+            if state["panel"] is not None:
+                state["panel"].destroy()
+            empty.pack_forget()
+            state["open"] = c["xuid"]
+            name = c["gamertag"] if not c["gamertag"].isdigit() else "Unknown player"
+            state["panel"] = self._chat_panel(right, name, c["xuid"], on_sent=load)
+            state["panel"].pack(fill="both", expand=True)
+            win.panel = state["panel"]
+
+        def on_select(_=None):
+            sel = tv.selection()
+            if not sel:
+                return
+            iid = sel[0]
+            if iid not in rows:                                # a preview line: open its conversation
+                iid = tv.parent(iid)
+            if iid in rows:
+                open_chat(rows[iid])
+
+        tv.bind("<<TreeviewSelect>>", on_select)
+
+        def on_type(*_):
+            if state["placeholder"]:
+                return
+            if state["results"] is not None and typed() != state["term"]:
+                state["results"] = None
+            render()
+        query.trace_add("write", on_type)
+
+        def search(_=None):
+            term = typed()
+            if not term:
+                return
+            info.set(f"Searching Xbox for \"{term}\"...")
+
+            def found(res, err):
+                if not win.winfo_exists():
+                    return
+                if err:
+                    return info.set(f"Xbox search failed: {err}")
+                state["results"], state["term"] = res, term
+                summary()
+                render()
+            self._xbox_bg(lambda k: social.search_players(k, term), found)
+        entry.bind("<Return>", search)
+        entry.bind("<Escape>", lambda e: query.set(""))
+
+        def placeholder(on):                                   # grey hint text while the box is empty
+            if on and not query.get():
+                state["placeholder"] = True
+                entry.configure(foreground=P["muted"])
+                query.set(hint)
+            elif not on and state["placeholder"]:
+                query.set("")
+                state["placeholder"] = False
+                entry.configure(foreground=P["fg"])
+        entry.bind("<FocusIn>", lambda e: placeholder(False))
+        entry.bind("<FocusOut>", lambda e: placeholder(True))
+
+        def summary():
+            unread = sum(1 for c in chats if c.get("unread"))
+            info.set(f"{len(chats)} conversations" + (f" · {unread} unread" if unread else "")
+                     + f" · {self.xkey.active() or ''}")
+
+        def show(res, err):
+            if not win.winfo_exists():
+                return
+            if err:
+                return info.set(err)
+            chats[:] = res["chats"]
+            summary()
+            if res["groups"]:
+                info.set(info.get() + f" · {res['groups']} group chat(s) not shown")
+            render()
+
+        def load():
+            self._xbox_bg(social.inbox, show)
+
+        placeholder(True)
+        win.inbox_tv, win.info, win.query, win.search, win.entry = tv, info, query, search, entry   # for tests
+        win.rows = lambda: [(tv.item(i, "text").strip(" ●"), tv.item(i, "values")[0]) for i in rows]
+        win.open = lambda gt: [tv.selection_set(i) for i, c in rows.items() if c["gamertag"] == gt]
+        win.panel = None
+        self._place_dialog(win, 1000, 660)
         load()
         return win
 

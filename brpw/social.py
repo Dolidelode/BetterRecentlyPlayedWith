@@ -109,6 +109,16 @@ def parse_friend_list(payload, in_list: bool = True) -> List[dict]:
     return out
 
 
+def message_text(m: dict) -> str:
+    """The text of one Xbox message (contentPayload.content.parts[] of type "text")."""
+    cp = (m.get("contentPayload") or {}).get("content")
+    parts = cp.get("parts") if isinstance(cp, dict) else None
+    if isinstance(parts, list):
+        return " ".join(str(p.get("text") or "") for p in parts if isinstance(p, dict)
+                        and p.get("contentType") == "text").strip() or "(not text: picture or other content)"
+    return str(cp) if isinstance(cp, str) else "(not text: picture or other content)"
+
+
 def parse_history(payload) -> dict:
     """{"messages": [{"sender", "text", "at"}...] oldest first, "more": bool}. Shape seen for real:
     content.messages[].contentPayload.content.parts[] with contentType "text"; deleted messages are left out."""
@@ -120,21 +130,14 @@ def parse_history(payload) -> dict:
     for m in msgs:
         if not isinstance(m, dict) or m.get("isDeleted"):
             continue
-        cp = (m.get("contentPayload") or {}).get("content")
-        parts = cp.get("parts") if isinstance(cp, dict) else None
-        if isinstance(parts, list):
-            text = " ".join(str(p.get("text") or "") for p in parts if isinstance(p, dict)
-                            and p.get("contentType") == "text").strip() or "(not text: picture or other content)"
-        else:
-            text = str(cp) if isinstance(cp, str) else "(not text: picture or other content)"
-        out.append({"sender": str(m.get("sender") or ""), "text": text, "at": _iso_to_epoch(m.get("timestamp"))})
+        out.append({"sender": str(m.get("sender") or ""), "text": message_text(m),
+                    "at": _iso_to_epoch(m.get("timestamp"))})
     out.sort(key=lambda m: m["at"] or 0)
     return {"messages": out, "more": content.get("continuationToken") is not None}
 
 
 def history(key: str, xuid, call: Call = None) -> dict:
-    """Your messages with one player. The conversation list endpoints answer 405 at OpenXBL right now, so history
-    is per player only. OpenXBL documents no way to page further back."""
+    """Your messages with one player (the newest; no way to page further back is documented)."""
     return parse_history((call or openxbl_call)("GET", API + "messages/" + _check_xuid(xuid), key))
 
 
@@ -221,6 +224,58 @@ def _start(link):
 def _web(url):
     import webbrowser
     webbrowser.open(url)
+
+
+def parse_inbox(payload, me: str) -> dict:
+    """Your conversations, newest first: {"chats": [{xuid, text, mine, at, unread}], "groups": number skipped}.
+    Shape seen for real (Xbox messaging inbox): primary.conversations[] with participants, lastMessage, isRead."""
+    content = payload.get("content") if isinstance(payload, dict) else None
+    primary = content.get("primary") if isinstance(content, dict) else None
+    convs = primary.get("conversations") if isinstance(primary, dict) else None
+    if not isinstance(convs, list):
+        raise ProviderError("Unexpected message inbox from Xbox.")
+    chats, groups = [], 0
+    for c in convs:
+        if not isinstance(c, dict):
+            continue
+        people = [str(p) for p in (c.get("participants") or [])]
+        if c.get("type") != "OneToOne" or len(people) != 2:
+            groups += 1                                       # group chats aren't shown (yet)
+            continue
+        other = next((p for p in people if p != me), None)
+        if not _xuid(other):
+            continue
+        last = c.get("lastMessage") if isinstance(c.get("lastMessage"), dict) else {}
+        chats.append({"xuid": other, "text": message_text(last) if last else "", "mine": str(last.get("sender")) == me,
+                      "at": _iso_to_epoch(last.get("timestamp") or c.get("timestamp")),
+                      "unread": c.get("isRead") is False})
+    chats.sort(key=lambda c: -(c["at"] or 0))
+    return {"chats": chats, "groups": groups}
+
+
+def profiles(key: str, xuids: List[str], call: Call = None) -> dict:
+    """xuid -> {gamertag, state, text} for these players (10 per request: Xbox refuses 20 with HTTP 400)."""
+    out, ids = {}, [x for x in dict.fromkeys(xuids) if _xuid(x)]
+    for i in range(0, len(ids), 10):
+        payload = (call or openxbl_call)("GET", API + "player/summary/" + ",".join(ids[i:i + 10]), key)
+        for p in parse_friend_list(payload, in_list=False):
+            out[p["xuid"]] = {"gamertag": p["gamertag"], "state": p["state"], "text": p["text"]}
+    return out
+
+
+def inbox(key: str, call: Call = None) -> dict:
+    """All your one-to-one Xbox conversations with names and online status. Needs a Microsoft sign-in: OpenXBL's
+    inbox endpoints answer HTTP 405."""
+    from . import direct
+    from .msauth import MARK
+    if not direct.is_ms_key(key):
+        raise ProviderError("The message inbox needs an account signed in with Microsoft (☰ > Add Xbox account...): "
+                            "OpenXBL's inbox doesn't work right now.")
+    res = parse_inbox((call or openxbl_call)("GET", API + "conversations", key), key.strip()[len(MARK):])
+    names = profiles(key, [c["xuid"] for c in res["chats"]], call)
+    for c in res["chats"]:
+        c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": ""}, preview=c["text"])
+    return res
 
 
 def search_players(key: str, term: str, call: Call = None) -> List[dict]:

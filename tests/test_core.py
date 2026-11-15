@@ -579,6 +579,24 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert texts == ['ON XBOX — "salty"', "nobody else found"]              # a friend found again isn't repeated
     assert d.friend_relations("Main") == {"2": "Friend"}                     # the Friend highlight is refreshed too
     fr.destroy()
+    # Messages: every conversation (newest first, unread marked), the chat opens on the right
+    monkeypatch.setattr(social, "inbox", lambda key: {"groups": 1, "chats": [
+        {"xuid": "1", "gamertag": "Old", "state": "Online", "text": "", "preview": "gg last night", "mine": False,
+         "at": _t.time() - 60, "unread": True},
+        {"xuid": "3", "gamertag": "New2", "state": "Offline", "text": "", "preview": "cya", "mine": True,
+         "at": _t.time() - 86400 * 3, "unread": False}]})
+    ib = app.inbox_dialog()
+    settle()
+    assert [r[0] for r in ib.rows()] == ["Old", "New2"] and "1 unread" in ib.info.get() and "1 group" in ib.info.get()
+    ib.open("Old")
+    root.update()
+    settle()
+    assert ib.panel is not None and ib.panel.texts() == ["gg last night"] and sent[-1] == ("GET", "messages/1", None)
+    ib.entry.focus_force()
+    root.update()
+    ib.query.set("ne")                                                       # filters by name
+    assert [r[0] for r in ib.rows()] == ["New2"]
+    ib.destroy()
     # Add account: Microsoft sign-in (the browser part is faked) becomes an account like a key; Remove forgets it
     from brpw.msauth import MARK
     dlg = app.set_key()

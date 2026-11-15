@@ -119,3 +119,48 @@ def test_search_players_shows_how_each_relates_to_you():
     assert c.seen[0][:2] == ("GET", "https://api.xbl.io/v2/search/salty%20sam")
     assert {r["gamertag"]: r["relation"] for r in res} == {"Salty Sam": "Not in your list", "Salty Mate": "Friend"}
     assert social.search_players("k", "   ", call=c) == [] and len(c.seen) == 1
+
+
+def msg(sender, text, ts):
+    return {"sender": sender, "timestamp": ts, "contentPayload": {"content": {"parts": [{"contentType": "text",
+                                                                                         "text": text}]}}}
+
+
+def test_inbox_lists_chats_newest_first_with_names(monkeypatch):
+    from brpw import direct
+    from brpw.msauth import MARK
+    me = "2535400000000001"
+    inbox = {"primary": {"conversations": [
+        {"type": "OneToOne", "participants": [me, "11"], "isRead": True,
+         "lastMessage": msg(me, "see you at the fort", "2026-11-10T20:00:00Z")},
+        {"type": "OneToOne", "participants": ["12", me], "isRead": False,
+         "lastMessage": msg("12", "ahoy!", "2026-11-14T20:00:00Z")},
+        {"type": "Group", "participants": [me, "11", "12"]}]}}
+    seen = []
+
+    def call(method, url, key, data=None):
+        seen.append(url.rsplit("/v2/", 1)[1])
+        if url.endswith("/conversations"):
+            return {"content": inbox}
+        ids = url.rsplit("/", 1)[1].split(",")
+        return {"content": {"people": [{"xuid": x, "gamertag": f"Player{x}", "presenceState": "Online"} for x in ids
+                                       if x != "11"]}}
+    res = social.inbox(MARK + me, call=call)
+    assert [(c["gamertag"], c["preview"], c["mine"], c["unread"]) for c in res["chats"]] == [
+        ("Player12", "ahoy!", False, True), ("11", "see you at the fort", True, False)]   # 11: no name found
+    assert res["groups"] == 1 and res["chats"][0]["state"] == "Online"
+    assert seen == ["conversations", "player/summary/12,11"]
+    with pytest.raises(ProviderError) as e:
+        social.inbox("plain-openxbl-key", call=call)                    # OpenXBL's inbox answers 405
+    assert "signed in with Microsoft" in str(e.value)
+
+
+def test_profiles_ask_ten_players_per_request():
+    asked = []
+
+    def call(method, url, key, data=None):
+        ids = url.rsplit("/", 1)[1].split(",")
+        asked.append(len(ids))
+        return {"content": {"people": [{"xuid": x, "gamertag": "G" + x} for x in ids]}}
+    names = social.profiles("k", [str(i) for i in range(1, 24)] + ["1", "bad"], call=call)
+    assert asked == [10, 10, 3] and len(names) == 23 and names["5"]["gamertag"] == "G5"

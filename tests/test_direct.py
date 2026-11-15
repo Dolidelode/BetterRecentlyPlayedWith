@@ -200,3 +200,10 @@ def test_dpapi_round_trip():
     except (AttributeError, OSError):
         pytest.skip("Windows only")
     assert "secret" not in blob and msauth.unprotect(blob) == "secret refresh token"
+
+
+def test_inbox_and_names_go_to_xbox_messaging_and_peoplehub(routed):
+    seen, _ = routed
+    key = msauth.MARK + XUID
+    social.openxbl_call("GET", social.API + "conversations", key)
+    assert seen[-1][:3] == ("GET", "https://xblmessaging.xboxlive.com/network/Xbox/users/me/inbox", "1")
