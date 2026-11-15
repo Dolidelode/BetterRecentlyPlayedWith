@@ -120,7 +120,7 @@ def _m8(c: sqlite3.Connection) -> None:
 
 
 def _m9(c: sqlite3.Connection) -> None:
-    # "Never link": players the user never wants a Twitch channel for (cheaters, ...). Guess Twitch skips them.
+    # "Never link": players the user never wants a Twitch channel for (cheaters, ...).
     c.execute("""CREATE TABLE twitch_never(
         account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
         reason TEXT NOT NULL DEFAULT '', set_at INTEGER NOT NULL)""")

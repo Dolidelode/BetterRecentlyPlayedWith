@@ -102,3 +102,13 @@ def test_xbox_sign_in_screen_link():
     assert social.open_xbox_sign_in(start=started.append, installed=lambda: True)
     assert started == [r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"]
     assert not social.open_xbox_sign_in(start=started.append, installed=lambda: False) and len(started) == 1
+
+
+def test_search_players_shows_how_each_relates_to_you():
+    c = Calls({"content": {"people": [
+        {"xuid": "1", "gamertag": "Salty Sam", "isFollowedByCaller": False, "isFollowingCaller": False},
+        {"xuid": "2", "gamertag": "Salty Mate", "isFollowedByCaller": True, "isFollowingCaller": True}]}})
+    res = social.search_players("k", " salty sam ", call=c)
+    assert c.seen[0][:2] == ("GET", "https://api.xbl.io/v2/search/salty%20sam")
+    assert {r["gamertag"]: r["relation"] for r in res} == {"Salty Sam": "Not in your list", "Salty Mate": "Friend"}
+    assert social.search_players("k", "   ", call=c) == [] and len(c.seen) == 1

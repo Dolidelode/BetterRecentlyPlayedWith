@@ -100,7 +100,7 @@ class TwitchClient:
     def token(self, force: bool = False) -> str:
         creds = self.creds.load()
         if not creds:
-            raise ProviderError("Twitch is not set up. Use 'Twitch setup...' first.", reauth=True)
+            raise ProviderError("Twitch is not set up. Use ☰ > Twitch setup... first.", reauth=True)
         if self._token_value and not force and self.now() < self._expires - 60:
             return self._token_value
         try:
@@ -120,7 +120,7 @@ class TwitchClient:
     def _get(self, path: str, params: List[Tuple[str, str]], _retry: bool = True) -> dict:
         creds = self.creds.load()
         if not creds:
-            raise ProviderError("Twitch is not set up. Use 'Twitch setup...' first.", reauth=True)
+            raise ProviderError("Twitch is not set up. Use ☰ > Twitch setup... first.", reauth=True)
         headers = {"Client-Id": creds[0], "Authorization": "Bearer " + self.token()}
         try:
             return self.http(API + path + "?" + urllib.parse.urlencode(params), None, headers)
@@ -161,25 +161,6 @@ class TwitchClient:
         for i in range(0, len(ids), CHUNK):
             for u in self._get("users", [("id", x) for x in ids[i:i + CHUNK]]).get("data") or []:
                 out[str(u["id"])] = TwitchUser(str(u["id"]), str(u["login"]), str(u.get("display_name") or u["login"]))
-        return out
-
-    def suggest(self, players: List[Tuple[int, str]]) -> List[dict]:
-        """Possible Twitch channels for (account_id, gamertag) pairs, found only by NAME. Not confirmed identities:
-        the caller must present them as guesses. Live status comes from Twitch itself."""
-        cands = {aid: login_candidates(gt) for aid, gt in players}
-        found = self.users_by_login([c for cs in cands.values() for c in cs])
-        live = self.streams([u.id for u in found.values()]) if found else {}
-        out = []
-        for aid, gt in players:
-            for c in cands[aid]:
-                u = found.get(c)
-                if u is None or any(o["account_id"] == aid and o["id"] == u.id for o in out):
-                    continue
-                s = live.get(u.id)
-                out.append({"account_id": aid, "gamertag": gt, "id": u.id, "login": u.login, "name": u.display_name,
-                            "live": bool(s), "game": s and s["game"], "title": s and s["title"],
-                            "viewers": s and s["viewers"],
-                            "sot": bool(s) and "sea of thieves" in (s["game"] or "").casefold()})
         return out
 
     def game_id(self, name: str = SOT_GAME) -> str:

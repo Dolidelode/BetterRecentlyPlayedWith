@@ -33,7 +33,7 @@ master list without your approval anyway.
 2. In the project: **SQL Editor** → New query → paste all of [`shared_list_setup.sql`](shared_list_setup.sql) → **Run**.
 3. **Project Settings → API Keys**: note the **Project URL**, the **publishable** key (`sb_publishable_...`)
    and a **secret** key (`sb_secret_...`).
-4. In the app: **Shared list...** → press **Ctrl+Shift+O** (the Owner setup button is only shown once a PC has the
+4. In the app: **☰ → Shared Twitch list...** → press **Ctrl+Shift+O** (the Owner setup button is only shown once a PC has the
    secret key) → paste the secret key, and the URL and publishable key unless the program already has them built in
    (then leave those empty) → **Save and test**. The owner tools now show in the Shared list window.
 5. **Publish my links** puts your own links in the master list.
@@ -61,7 +61,7 @@ can find them; that is fine, because the database only lets that key read the li
 
 ## Day to day
 
-* **Shared list...** shows how many channels the master list has and how many of your links it doesn't have yet.
+* **☰ → Shared Twitch list...** shows how many channels the master list has and how many of your links it doesn't have yet.
 * **Send my links** (everyone) sends your hand-made links that the master list doesn't have and that you haven't sent
   before.
 * **Review suggestions...** (owner) lists waiting suggestions with notes from data you already have: the master

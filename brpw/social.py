@@ -83,8 +83,9 @@ def send_message(key: str, xuid, text: str, call: Call = None) -> None:
     (call or openxbl_call)("POST", MESSAGE_URL, key, {"xuid": _check_xuid(xuid), "message": text})
 
 
-def parse_friend_list(payload) -> List[dict]:
-    """Friends with what they are doing, online first. Only fields OpenXBL actually returns are used."""
+def parse_friend_list(payload, in_list: bool = True) -> List[dict]:
+    """Friends with what they are doing, online first. Only fields OpenXBL actually returns are used.
+    in_list=False (search results): someone neither side follows is "Not in your list"."""
     content = payload.get("content") if isinstance(payload, dict) else None
     people = content.get("people") if isinstance(content, dict) else None
     if people is None and isinstance(payload, dict):
@@ -102,7 +103,7 @@ def parse_friend_list(payload) -> List[dict]:
             "state": str(p.get("presenceState") or "Unknown"), "text": str(p.get("presenceText") or ""),
             "favorite": bool(p.get("isFavorite")),
             "relation": ("Friend" if mine and theirs else "You follow" if mine else "Follows you" if theirs
-                         else "In your list"),
+                         else "In your list" if in_list else "Not in your list"),
             "last_seen": _iso_to_epoch(p.get("lastSeenDateTimeUtc"))})
     out.sort(key=lambda f: (f["state"].casefold() != "online", not f["favorite"], f["gamertag"].casefold()))
     return out
@@ -216,6 +217,15 @@ def _start(link):
 def _web(url):
     import webbrowser
     webbrowser.open(url)
+
+
+def search_players(key: str, term: str, call: Call = None) -> List[dict]:
+    """Anyone on Xbox by gamertag (Xbox's own fuzzy search, up to 15), with how they relate to you."""
+    term = (term or "").strip()
+    if not term:
+        return []
+    payload = (call or openxbl_call)("GET", API + "search/" + urllib.parse.quote(term), key)
+    return parse_friend_list(payload, in_list=False)
 
 
 def friend_list(key: str, call: Call = None) -> List[dict]:

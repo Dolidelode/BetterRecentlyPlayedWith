@@ -441,7 +441,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.selection_set(str(by["Old"]))
     items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
     assert items["Open Twitch"] and items["Link Twitch channel..."] and "Never link..." in items
-    assert set(items) >= {"Open SOTREP", "Check live", "Encounters", "Tag...", "Untag", "Guess Twitch"}
+    assert set(items) >= {"Open SOTREP", "Check live", "Encounters", "Tag...", "Untag"} and "Guess Twitch" not in items
     app.tree.selection_set([str(by["Old"]), str(by["New2"])])
     items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
     assert not items["Link Twitch channel..."]                       # needs exactly one player
@@ -564,8 +564,19 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     msg.destroy()
     fr = app.friends_dialog()
     settle()
-    row = fr.friends_tv.item(fr.friends_tv.get_children()[0], "values")
-    assert row[0] == "New" and row[1] == "Online" and row[2] == "Sea of Thieves" and "1 online" in fr.info.get()
+    assert fr.rows() == [("New", "●  Sea of Thieves", "")] and "1 online" in fr.info.get()
+    assert fr.friends_tv.item(fr.friends_tv.get_children()[0], "text") == "ONLINE — 1"     # sections
+    fr.select("New")
+    root.update()
+    assert fr.friend_btn.cget("text") == "Remove friend"
+    fr.entry.focus_force()
+    root.update()
+    fr.query.set("salty")                                                    # no friend matches...
+    fr.search()                                                              # ...so Enter searches Xbox
+    settle()
+    assert sent[-1] == ("GET", "search/salty", None)
+    texts = [fr.friends_tv.item(i, "text").strip() for i in fr.friends_tv.get_children()]
+    assert texts == ['ON XBOX — "salty"', "nobody else found"]              # a friend found again isn't repeated
     assert d.friend_relations("Main") == {"2": "Friend"}                     # the Friend highlight is refreshed too
     fr.destroy()
     # Add account: Microsoft sign-in (the browser part is faked) becomes an account like a key; Remove forgets it
@@ -589,32 +600,12 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.remove_account()
     assert removed == ["2535400000000777"] and "Dolly" not in app.xkey.names()
     app.xkey.set_active("Main")
-    # "Guess Twitch": suggestions are only linked after the user confirms them
-    app._on_twitch_guess([{"account_id": by["New2"], "gamertag": "New2", "id": "321", "login": "new2", "name": "New2",
-                           "live": True, "game": "Sea of Thieves", "title": "t", "viewers": 4, "sot": True}], None)
-    guess = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
-    assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "55"               # nothing changed before confirming
-    guess.guess_tv.selection_set(guess.guess_tv.get_children()[0])
-    guess.link_selected()
-    assert d.twitch_links([by["New2"]])[0]["twitch_id"] == "321" and not guess.winfo_exists()
-    # "Never link": marked players show it, lose their link, and Guess Twitch (no selection = everyone) skips them
+    # "Never link": marked players show it and lose their link
     app._ask_tag = lambda *a, **k: "cheater"
     app.tree.selection_set(str(by["New2"]))
     app.never_link_selected()
     assert app.tree.set(str(by["New2"]), "twitch") == "⛔ cheater" and not d.twitch_links([by["New2"]])
     d.merge_players([Player("Unlinked Pirate", "9876543210")], "import", False)
-    asked = []
-    app.tclient.suggest = lambda players: asked.append(players) or []
-    app.tree.selection_set(())
-    app.guess_twitch()
-    end = _t.time() + 5
-    while "twitchguess" in app.busy and _t.time() < end:
-        root.update()
-        _t.sleep(0.05)
-    assert asked, app.status.get()
-    guessed = {aid for aid, _ in asked[0]}
-    assert by["New2"] not in guessed and by["Old"] not in guessed and by["New"] not in guessed   # never / linked
-    assert guessed == {r["id"] for r in d.list_accounts() if not r["twitch_id"] and r["twitch_never"] is None}
     app.tree.selection_set(str(by["New2"]))
     app.never_link_selected()                                         # pressing it again removes the mark
     assert app.tree.set(str(by["New2"]), "twitch") == ""

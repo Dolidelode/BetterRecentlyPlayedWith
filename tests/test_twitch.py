@@ -306,14 +306,3 @@ def test_game_streams_pages_and_sorts():
     assert sum("/games" in u for u in calls) == 1                               # category ID looked up once
 
 
-def test_suggest_finds_same_name_channels_and_live_status():
-    users = {"examplestreamer": ("100200300", "ExampleStreamer"), "other_one": ("555", "Other_One")}
-    live = {"100200300": {"title": "t", "game": "Sea of Thieves", "viewers": 12}}
-    calls = []
-    cl = TwitchClient(Mem(), http=fake(users, live, calls), now=Clock())
-    out = cl.suggest([(1, "Example Streamer"), (2, "Other One"), (3, "Nobody Here Zz")])
-    by = {o["account_id"]: o for o in out}
-    assert set(by) == {1, 2}
-    assert by[1]["live"] and by[1]["sot"] and by[1]["viewers"] == 12 and by[1]["login"] == "examplestreamer"
-    assert not by[2]["live"] and by[2]["name"] == "Other_One"
-    assert sum(1 for u in calls if "/users" in u) == 1                        # all candidates in one request

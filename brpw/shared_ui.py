@@ -94,7 +94,7 @@ class SharedListMixin:
 
         self._bg("shared", client.master, done)
 
-    # ---- the "Shared list..." window
+    # ---- the "Shared Twitch list..." window
     def shared_dialog(self):
         win = getattr(self, "_shared_win", None)
         if win is not None and win.winfo_exists():
