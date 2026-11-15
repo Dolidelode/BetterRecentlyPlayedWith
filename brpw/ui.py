@@ -642,9 +642,8 @@ class App(SharedListMixin):
         self.root.clipboard_clear()
         self.root.clipboard_append(name)
         if social.open_xbox_sign_in():
-            self.set_status(f"Xbox app opened ({name} copied). Click your profile picture (top left) > Sign out, then "
-                            f"sign in as {name}: Game Bar uses the same sign-in. Accounts added in Windows Settings > "
-                            "Accounts > Email & accounts need no password.")
+            self.set_status(f"Xbox sign-in opened ({name} copied). Sign in as {name}: Game Bar uses the same sign-in. "
+                            "Accounts added in Windows Settings > Accounts > Email & accounts need no password.")
         else:
             self.set_status(f"Couldn't open the Xbox app ({name} copied). In the Xbox app, click your profile > "
                             "Sign out, then sign in as {name}.".replace("{name}", name), error=True)

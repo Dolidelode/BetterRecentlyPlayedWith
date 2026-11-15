@@ -100,8 +100,15 @@ def test_game_bar_social_widget_link():
 def test_xbox_sign_in_screen_link():
     started = []
     assert social.open_xbox_sign_in(start=started.append, installed=lambda: True)
-    assert started == [r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"]
+    assert started == ["msxbox://signIn/"]
     assert not social.open_xbox_sign_in(start=started.append, installed=lambda: False) and len(started) == 1
+
+    def no_sign_in_link(link):
+        if link.startswith("msxbox:"):
+            raise OSError("no handler")
+        started.append(link)
+    assert social.open_xbox_sign_in(start=no_sign_in_link, installed=lambda: True)     # falls back to a normal start
+    assert started[-1] == r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"
 
 
 def test_search_players_shows_how_each_relates_to_you():

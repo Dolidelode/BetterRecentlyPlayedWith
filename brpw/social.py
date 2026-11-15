@@ -168,20 +168,24 @@ def xbox_app_installed() -> bool:
 GAMEBAR_SOCIAL = "ms-gamebar://launchForeground/activate/Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"
 
 
-# Start the Xbox app normally (its Start-menu entry). Game Bar shares the Xbox app's Windows sign-in; the user switches
-# the account in the Xbox app itself. (The app's msxbox://signIn/ link was tried and left the Xbox app stuck on
-# "Launching" when already signed in, so it is not used.)
+# The Xbox app's own sign-in screen (a link from its jump list). Game Bar shares the Xbox app's Windows sign-in, so
+# signing in there switches Game Bar too; the user picks the account in Microsoft's account picker. Confirmed to show
+# the login screen. (Once, before a reboot, the Xbox app hung on "Launching" after it; closing it from the tray or a
+# reboot cleared that.) If the link can't be opened, the Xbox app is started normally instead.
+XBOX_SIGN_IN = "msxbox://signIn/"
 XBOX_APP = r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"
 
 
 def open_xbox_sign_in(start=None, installed=xbox_app_installed) -> bool:
     if not installed():
         return False
-    try:
-        (start or _start)(XBOX_APP)
-        return True
-    except OSError:
-        return False
+    for link in (XBOX_SIGN_IN, XBOX_APP):
+        try:
+            (start or _start)(link)
+            return True
+        except OSError:
+            continue
+    return False
 
 
 def open_gamebar_social(start=None, installed=lambda: _registered("ms-gamebar")) -> bool:
