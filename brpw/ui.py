@@ -24,6 +24,8 @@ from .twitch import (CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, Tw
 
 MIN_INTERVAL = 30
 REFRESH_MODES = ("Only while SoT is open", "Always", "Off")
+XBOX_MODE = "While Xbox says I play SoT"     # your own Xbox presence: also counts Sea of Thieves on a console
+PRESENCE_EVERY = 120                         # seconds between those presence checks (OpenXBL's hourly budget)
 
 
 class _MemCreds:
@@ -103,6 +105,10 @@ class App(SharedListMixin):
         self.paused = db.get_setting("paused", "0") == "1"
         self.game_check = game_running     # replaced in tests
         self.game_was_running = False
+        self.xbox_playing = None                 # last answer of your own Xbox presence (XBOX_MODE)
+        self.xbox_was_playing = False
+        self.presence_at = 0.0
+        self.presence_busy = False
         self.theme = clamp(db.get_setting("theme"))
         self.pal = palette(self.theme)
         self.status_error = False
@@ -226,7 +232,7 @@ class App(SharedListMixin):
         r = self.root
         r.title("Better Recently Played With")
         r.geometry("1080x600")
-        r.minsize(900, 400)
+        r.minsize(1040, 400)
         self._apply_style()
         self._apply_icon()
 
@@ -241,9 +247,11 @@ class App(SharedListMixin):
                                                                                                 padx=(8, 0))
         ttk.Label(bar, text="Auto", style="BarHint.TLabel").pack(side="left", padx=(16, 4))
         self.mode_var = tk.StringVar(value=REFRESH_MODES[2] if self.paused else
+                                     XBOX_MODE if self.db.get_setting("refresh_xbox", "0") == "1" else
                                      REFRESH_MODES[0] if self.db.get_setting("only_with_game", "1") == "1"
                                      else REFRESH_MODES[1])
-        mb = ttk.Combobox(bar, textvariable=self.mode_var, state="readonly", width=19, values=REFRESH_MODES)
+        mb = ttk.Combobox(bar, textvariable=self.mode_var, state="readonly", width=24,
+                          values=(REFRESH_MODES[0], XBOX_MODE, REFRESH_MODES[1], REFRESH_MODES[2]))
         mb.pack(side="left")
         mb.bind("<<ComboboxSelected>>", lambda e: self.set_refresh_mode(self.mode_var.get()))
         ttk.Label(bar, text="every", style="BarHint.TLabel").pack(side="left", padx=(8, 4))
@@ -1967,13 +1975,17 @@ class App(SharedListMixin):
         self._show_live_results(results, only_live, note)
 
     def set_refresh_mode(self, mode: str):
-        """'Only while SoT is open', 'Always' or 'Off' (Off also stops the background live and Twitch checks)."""
+        """'Only while SoT is open', 'While Xbox says I play SoT', 'Always' or 'Off' (Off also stops the background
+        live and Twitch checks)."""
         self.mode_var.set(mode)
         self.paused = mode == REFRESH_MODES[2]
         self.db.set_setting("paused", "1" if self.paused else "0")
         if not self.paused:
             self.db.set_setting("only_with_game", "1" if mode == REFRESH_MODES[0] else "0")
-        self.set_status({REFRESH_MODES[0]: "Auto-refresh only runs while Sea of Thieves is open.",
+            self.db.set_setting("refresh_xbox", "1" if mode == XBOX_MODE else "0")
+        self.presence_at = 0.0                       # ask Xbox again on the next round
+        self.set_status({REFRESH_MODES[0]: "Auto-refresh only runs while Sea of Thieves is open on this PC.",
+                         XBOX_MODE: "Auto-refresh runs while Xbox says you're in Sea of Thieves (PC or console).",
                          REFRESH_MODES[1]: "Auto-refresh always runs.",
                          REFRESH_MODES[2]: "Auto-refresh is off. 'Refresh now' still works."}[mode])
         self._schedule()
@@ -2123,9 +2135,49 @@ class App(SharedListMixin):
 
     def _tick(self):
         self.after_id = None
-        if self._provider() and self._game_allows_refresh():
-            self.refresh_now(manual=False)
+        if self._provider():
+            if self.mode_var.get() == XBOX_MODE:
+                self._xbox_presence_round()
+            elif self._game_allows_refresh():
+                self.refresh_now(manual=False)
         self._schedule()
+
+    def _xbox_presence_round(self):
+        """'While Xbox says I play SoT': your own Xbox presence decides, so a console session counts too. Xbox is
+        asked at most every PRESENCE_EVERY seconds; in between the last answer is used. The first round after you
+        stop still runs, so the players of the last session are picked up."""
+        if time.time() - self.presence_at < PRESENCE_EVERY and self.xbox_playing is not None:
+            return self._after_presence(self.xbox_playing, None)
+        if self.presence_busy:
+            return
+        self.presence_busy = True
+        key = self.xkey.get()
+
+        def work():
+            try:
+                playing, err = social.am_i_playing_sot(key), None
+            except ProviderError as e:
+                playing, err = None, str(e)
+            except Exception as e:                   # never let a worker thread die silently
+                playing, err = None, f"Unexpected error: {e}"
+            self.q.put(("call", lambda: self._after_presence(playing, err, fresh=True)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_presence(self, playing, err, fresh=False):
+        if fresh:
+            self.presence_busy = False
+            self.presence_at = time.time()
+            self.xbox_playing = playing
+        if self.mode_var.get() != XBOX_MODE or self.closing:
+            return
+        if err:                                      # can't tell: keep refreshing as before
+            self.set_status(f"Couldn't ask Xbox whether you're playing ({err}). Refreshing anyway.", error=True)
+            playing = True
+        if playing or self.xbox_was_playing:
+            self.xbox_was_playing = bool(playing)
+            self.refresh_now(manual=False)
+        else:
+            self.set_status("Auto-refresh waiting: Xbox says you're not in Sea of Thieves. 'Refresh now' still works.")
 
     def _game_allows_refresh(self) -> bool:
         """With 'only while Sea of Thieves is open' on, auto-refresh skips rounds while the game is closed. The first

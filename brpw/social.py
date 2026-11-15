@@ -278,6 +278,29 @@ def inbox(key: str, call: Call = None) -> dict:
     return res
 
 
+SOT_TITLE_ID = "1717113201"
+
+
+def playing_sot(payload) -> bool:
+    """Your own presence: are you in Sea of Thieves right now, on any device (PC or console)? Only the titles of an
+    online device count; lastSeen (what you played last) does not."""
+    node = payload.get("content", payload) if isinstance(payload, dict) else payload
+    if isinstance(node, list):
+        node = next((n for n in node if isinstance(n, dict) and "state" in n), {})
+    if not isinstance(node, dict) or str(node.get("state", "")).casefold() != "online":
+        return False
+    for device in node.get("devices") or []:
+        for t in (device.get("titles") or []) if isinstance(device, dict) else []:
+            if isinstance(t, dict) and (str(t.get("id") or t.get("titleId") or "") == SOT_TITLE_ID
+                                        or "sea of thieves" in str(t.get("name") or t.get("titleName") or "").casefold()):
+                return True
+    return False
+
+
+def am_i_playing_sot(key: str, call: Call = None) -> bool:
+    return playing_sot((call or openxbl_call)("GET", API + "presence", key))
+
+
 def search_players(key: str, term: str, call: Call = None) -> List[dict]:
     """Anyone on Xbox by gamertag (Xbox's own fuzzy search, up to 15), with how they relate to you."""
     term = (term or "").strip()

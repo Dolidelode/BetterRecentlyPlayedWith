@@ -111,6 +111,8 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
         xuids = [x for x in path.split("/", 2)[2].split(",") if x.isdigit()]
         return {"content": _request("GET", f"{PEOPLEHUB}/xuids({','.join(xuids)})/decoration/{SUMMARY_DECORATIONS}",
                                     auth, "5")}
+    if m == "GET" and path == "presence":
+        return {"content": _request("GET", "https://userpresence.xboxlive.com/users/me?level=all", auth, "3")}
     if m == "GET" and re.fullmatch(r"presence/\d+", path):
         x = path.split("/")[1]
         return {"content": _request("GET", f"https://userpresence.xboxlive.com/users/xuid({x})?level=all", auth, "3")}

@@ -207,3 +207,9 @@ def test_inbox_and_names_go_to_xbox_messaging_and_peoplehub(routed):
     key = msauth.MARK + XUID
     social.openxbl_call("GET", social.API + "conversations", key)
     assert seen[-1][:3] == ("GET", "https://xblmessaging.xboxlive.com/network/Xbox/users/me/inbox", "1")
+
+
+def test_own_presence_goes_to_userpresence_me(routed):
+    seen, _ = routed
+    social.openxbl_call("GET", social.API + "presence", msauth.MARK + XUID)
+    assert seen[-1][:3] == ("GET", "https://userpresence.xboxlive.com/users/me?level=all", "3")

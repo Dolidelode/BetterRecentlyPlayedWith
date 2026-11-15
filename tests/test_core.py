@@ -755,6 +755,41 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert app.paused and app.after_id is None and d.get_setting("paused") == "1"
     app.set_refresh_mode("Only while SoT is open")
     assert not app.paused and app.after_id and d.get_setting("only_with_game") == "1"
+    # 'While Xbox says I play SoT': your own Xbox presence decides (works for a console session too)
+    from brpw import social
+    playing, asked = [False], []
+    monkeypatch.setattr(social, "am_i_playing_sot", lambda key: asked.append(key) or playing[0])
+
+    def presence_tick():
+        app._tick()
+        end = _t.time() + 5
+        while app.presence_busy and _t.time() < end:
+            root.update()
+            _t.sleep(0.02)
+        root.update()
+    refreshed.clear()
+    app.set_refresh_mode(ui.XBOX_MODE)
+    assert d.get_setting("refresh_xbox") == "1" and d.get_setting("only_with_game") == "0"
+    presence_tick()
+    assert refreshed == [] and "not in Sea of Thieves" in app.status.get() and len(asked) == 1
+    presence_tick()                                    # within PRESENCE_EVERY: the last answer, no new request
+    assert len(asked) == 1 and refreshed == []
+    playing[0] = True
+    app.presence_at = 0
+    presence_tick()
+    assert refreshed == [False]
+    playing[0] = False
+    app.presence_at = 0
+    presence_tick()                                    # one last round right after you stop playing
+    app.presence_at = 0
+    presence_tick()
+    assert refreshed == [False, False] and len(asked) == 4
+    monkeypatch.setattr(social, "am_i_playing_sot", lambda key: (_ for _ in ()).throw(ProviderError("HTTP 429")))
+    app.presence_at = 0
+    presence_tick()                                    # Xbox can't tell: refresh as before
+    assert refreshed == [False, False, False] and "Refreshing anyway" in app.status.get()
+    app.set_refresh_mode("Only while SoT is open")
+    assert d.get_setting("refresh_xbox") == "0"
     app.refresh_now = real_refresh
     app.tcreds.clear()
     app.xkey.remove("Main")                            # no key left: Live checks must not start a worker

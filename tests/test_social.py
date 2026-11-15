@@ -164,3 +164,19 @@ def test_profiles_ask_ten_players_per_request():
         return {"content": {"people": [{"xuid": x, "gamertag": "G" + x} for x in ids]}}
     names = social.profiles("k", [str(i) for i in range(1, 24)] + ["1", "bad"], call=call)
     assert asked == [10, 10, 3] and len(names) == 23 and names["5"]["gamertag"] == "G5"
+
+
+def test_playing_sea_of_thieves_from_your_own_presence():
+    online_sot = {"xuid": "1", "state": "Online", "devices": [
+        {"type": "Scarlett", "titles": [{"id": "750323071", "name": "Home"},
+                                        {"id": "1717113201", "name": "Sea of Thieves", "placement": "Full"}]}]}
+    assert social.playing_sot({"content": online_sot})                            # Microsoft sign-in shape
+    assert social.playing_sot([online_sot])                                       # a list, as some APIs answer
+    steam = {"state": "Online", "devices": [{"titles": [{"id": "999", "name": "Sea of Thieves: 2026 Edition"}]}]}
+    assert social.playing_sot(steam)                                              # matched by name too
+    assert not social.playing_sot({"content": {"state": "Online", "devices": [{"titles": [{"id": "1", "name": "Halo"}]}]}})
+    offline = {"xuid": "1", "state": "Offline", "lastSeen": {"titleId": "1717113201", "titleName": "Sea of Thieves"}}
+    assert not social.playing_sot({"content": offline})                           # played earlier doesn't count
+    assert not social.playing_sot({}) and not social.playing_sot(None)
+    c = Calls({"content": online_sot})
+    assert social.am_i_playing_sot("k", call=c) and c.seen[0][:2] == ("GET", "https://api.xbl.io/v2/presence")

@@ -25,7 +25,7 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/Dolidelode/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
 2. **☰ → Import players...** to paste gamertags, or **☰ → Add Xbox account...** for live sync (below).
 3. Double-click a player (or **Open SOTREP**). Select several rows and **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically), and **Encounters...** for a summary of the selected players (first/last seen, times seen, name changes, friend status, Xbox's "last online" when known) plus every recorded encounter.
-4. Leave it open: it refreshes every 60 s (changeable next to **Auto**, minimum 30 s; set **Auto** to Off any time).
+4. Leave it open: it refreshes every 60 s (changeable next to **Auto**, minimum 30 s; set **Auto** to Off any time). **Auto** decides when: *Only while SoT is open* (the game runs on this PC), *While Xbox says I play SoT* (your own Xbox presence, so playing on a **console** counts too; Xbox is asked at most every 2 minutes), *Always* or *Off*. The first round after you stop playing still runs, so the players of your last session are picked up. With *Appear offline* on Xbox, Xbox reports you as offline, so use one of the other choices then.
 
 Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `openxbl_keys.json`), so updating or moving the exe never touches it.
 
