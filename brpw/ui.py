@@ -1,17 +1,19 @@
 """Tkinter UI. All network/DB-heavy work runs in worker threads; results return via a queue."""
+import json
 import queue
 import subprocess
 import threading
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, scrolledtext, ttk
+from tkinter import font as tkfont
 
 from . import __version__, chat_ui, direct, social, sotrep, updater, xboxui
 from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError, account_picture,
-                        find_gamertag, lookup_gamertag)
+                        lookup_gamertag)
 from .game import game_running
 from .msauth import MARK, MsAccounts
 from .shared import SharedConfig, http_rest
@@ -19,8 +21,7 @@ from .shared_ui import SHARED_MARK, SharedListMixin
 from .live import HOURLY_BUDGET, LIVE_SCOPE, LiveChecker
 from .sync import SyncOutcome, SyncService
 from .themes import THEMES, clamp, icon_path, palette, twitch_icon_path
-from .twitch import (CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, TwitchClient, TwitchCreds,
-                     login_candidates)
+from .twitch import CHECK_EVERY, CONSOLE_URL, STATUS_MAX_AGE, TwitchChecker, TwitchClient, TwitchCreds
 
 MIN_INTERVAL = 30
 REFRESH_MODES = ("Only while SoT is open", "Always", "Off")
@@ -109,6 +110,23 @@ class Spinner(tk.Canvas):
         self.job = self.after(55, self._tick)
 
 
+class _TabCount:
+    """The Friends & messages tab as the app's old Messages button: set_text shows the count on the tab,
+    set_kind("accent") puts a dot on it."""
+
+    def __init__(self, strip, key, base):
+        self.strip, self.key, self.base = strip, key, base
+
+    def set_text(self, text):
+        self.strip.set_label(self.key, text)
+
+    def set_kind(self, kind):
+        self.strip.mark(self.key, kind == "accent")
+
+    def cget(self, key):
+        return self.strip.label(self.key) if key == "text" else None
+
+
 class App(SharedListMixin):
     # where pictures and hours come from (swapped in tests, so they never reach Xbox)
     fetch_profiles = staticmethod(lambda key, xuids: social.profiles(key, xuids))
@@ -153,11 +171,17 @@ class App(SharedListMixin):
         self.msg_seen = {}                       # key -> {xuid: time of the newest message already announced}
         self.msg_opened = {}                     # xuid -> when its chat was last opened here
         self.msg_unread = []                     # unread chats not opened here yet (the Messages button count)
+        self.req_waiting = []                    # friend requests waiting for an answer (also counted)
+        self.req_seen = {}                       # key -> xuids of requests already announced
+        self.msg_rounds = 0
         self.toast = None
         self.inbox_win = None
+        self.last_streams = self.last_live = None   # what the Live streams / Live now tabs showed last
         self.inbox_cache = {}                    # key -> last inbox (shown at once next time)
         self.chat_cache = {}                     # (key, xuid) -> last history
         self.pictures = chat_ui.Pictures(data_dir() / "pictures", lambda fn: self.q.put(("call", fn)))
+        self.previews = chat_ui.Previews(lambda fn: self.q.put(("call", fn)))     # Twitch's live snapshots
+        self.root.after(20_000, self._prune_round)      # after the first sync, never in its way
         self._badged, self._pic_job = {}, None         # pictures with a Twitch badge; pending redraw
         self.profiles_busy, self.profiles_at = False, 0.0
         self._build()
@@ -259,7 +283,7 @@ class App(SharedListMixin):
             self.tree.tag_configure("friend", background=P["friend"])
             self.tree.tag_configure("odd", background=P["stripe"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
-            self.legend.configure(bg=P["friend"], fg=FG)
+            self.legend.configure(bg=chat_ui.friend_shade(chat_ui._mix(P["bg"], P["panel"], 0.85)), fg=FG)
             self.spinner.recolor(acc, BG)
 
     def _recolor(self, widget, old, new):
@@ -323,7 +347,7 @@ class App(SharedListMixin):
         r = self.root
         r.title("Better Recently Played With")
         r.geometry("1080x600")
-        r.minsize(1040, 400)
+        r.minsize(480, 400)                                 # slim works too: rows wrap, Friends becomes one column
         self._apply_style()
         self._apply_icon()
 
@@ -340,7 +364,7 @@ class App(SharedListMixin):
         bar = tk.Frame(r, bg=P["head"])
         bar.pack(fill="x")
         self.top_bar = bar
-        inner = tk.Frame(bar, bg=P["head"])
+        inner = chat_ui.Flow(bar, P["head"], gap=8)
         inner.pack(fill="x", padx=12, pady=9)
         self.acct_var = tk.StringVar()
         self.acct_box = chat_ui.PillSelect(inner, P, P["head"], self.acct_var, on_change=self.switch_account,
@@ -348,9 +372,9 @@ class App(SharedListMixin):
                                            font=("Segoe UI", 10, "bold"), padx=16, pady=7,
                                            image_for=self._account_image)
         self._pills.append(self.acct_box)
-        self.acct_box.pack(side="left")
-        pill(inner, "↻  Refresh", self.refresh_now, kind="accent", font=("Segoe UI", 10, "bold"), padx=16,
-             pady=7).pack(side="left", padx=(8, 0))
+        inner.add(self.acct_box)
+        inner.add(pill(inner, "↻  Refresh", self.refresh_now, kind="accent", font=("Segoe UI", 10, "bold"), padx=16,
+                       pady=7))
         self.mode_var = tk.StringVar(value=REFRESH_MODES[2] if self.paused else
                                      XBOX_MODE if self.db.get_setting("refresh_xbox", "0") == "1" else
                                      REFRESH_MODES[0] if self.db.get_setting("only_with_game", "1") == "1"
@@ -360,29 +384,38 @@ class App(SharedListMixin):
                                            on_change=lambda: self.set_refresh_mode(self.mode_var.get()),
                                            prefix="Auto:  ", padx=14, pady=7)
         self._pills.append(self.mode_box)
-        self.mode_box.pack(side="left", padx=(16, 0))
-        tk.Label(inner, text="every", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
-                                                                                           padx=(10, 4))
+        inner.add(self.mode_box, space=8)
+        every = tk.Frame(inner, bg=P["head"])                 # "every 60 s" wraps as one piece
+        tk.Label(every, text="every", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
+                                                                                           padx=(2, 4))
         self.interval = tk.IntVar(value=int(self.db.get_setting("interval", "60")))
-        sp = ttk.Spinbox(inner, from_=MIN_INTERVAL, to=3600, increment=10, width=4, textvariable=self.interval,
+        sp = ttk.Spinbox(every, from_=MIN_INTERVAL, to=3600, increment=10, width=4, textvariable=self.interval,
                          command=self._save_interval)
         sp.pack(side="left")
         sp.bind("<FocusOut>", lambda e: self._save_interval())
-        tk.Label(inner, text="s", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(3, 0))
+        tk.Label(every, text="s", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(3, 0))
+        inner.add(every)
         self.auto_upd = tk.BooleanVar(value=self.db.get_setting("auto_update_check", "1") == "1")
         self.menu_btn = pill(inner, "☰", self._main_menu, padx=12, pady=7)
-        self.menu_btn.pack(side="right", padx=(6, 0))
-        for text, cmd in (("Live streams", self.sot_streams), ("Check live", self.check_live_all),
-                          ("Messages", self.inbox_dialog), ("Friends", self.friends_dialog)):
-            b = pill(inner, text, cmd, pady=7)
-            b.pack(side="right", padx=3)
-            if text == "Messages":
-                self.msg_btn = b
+        inner.add(self.menu_btn, right=True)
         self.msg_popups = tk.BooleanVar(value=self.db.get_setting("message_popups", "1") == "1")
+
+        # ---- tabs: everything opens inside this window (no separate windows); switching tabs keeps each page as
+        # it was, so nothing reloads; only Refresh / Check again asks Xbox or Twitch again
+        nav = tk.Frame(r, bg=P["head"])
+        nav.pack(fill="x")
+        self.tabstrip = chat_ui.TabStrip(nav, P, P["head"], self._tab_clicked, self._tab_close)
+        self.tabstrip.pack(fill="x", padx=6, pady=(0, 2))
+        self.pages_host = tk.Frame(r, bg=P["bg"])
+        self.pages_host.pack(fill="both", expand=True)
+        self.pages, self.page_now = {}, None
+        for key, label in self.MAIN_TABS:
+            self.tabstrip.add(key, label)
+        self.msg_btn = _TabCount(self.tabstrip, "social", self.SOCIAL)
         self._refresh_accounts()
 
-        self.players_tab = tk.Frame(r, bg=P["bg"])
-        self.players_tab.pack(fill="both", expand=True)
+        self.players_tab = tk.Frame(self.pages_host, bg=P["bg"])
+        self._show_page("players")
         try:
             self.twitch_img = tk.PhotoImage(file=str(twitch_icon_path()))
         except tk.TclError:
@@ -397,6 +430,11 @@ class App(SharedListMixin):
         def make_search(parent, bg):
             return tk.Entry(parent, textvariable=self.search, bg=bg, fg=P["fg"], insertbackground=P["fg"],
                             relief="flat", bd=0, font=("Segoe UI", 10), highlightthickness=0)
+        self.crew_var = tk.StringVar()                    # "⚓ Your sloop: A, B" while you're on a ship
+        self.crew_line = tk.Label(self.players_tab, textvariable=self.crew_var, bg=P["bg"], fg=P["fg"],
+                                  font=("Segoe UI", 10, "bold"), anchor="w")
+        self.crew_line.pack(fill="x", padx=18, pady=(10, 0), before=bar2)
+        self.crew_line.pack_forget()
         self.search_box = chat_ui.RoundBox(bar2, P, P["bg"], make_search, height=38, radius=19)
         self.search_box.pack(side="left", fill="x", expand=True)
         hint = tk.Label(bar2, text="Search players, tags or XUID", bg=self.search_box.fill, fg=P["muted"],
@@ -413,33 +451,56 @@ class App(SharedListMixin):
         entry.bind("<FocusOut>", show_hint, add="+")
         hint.bind("<Button-1>", lambda e: entry.focus_set())
         self.root.after_idle(show_hint)
-        sortbar = tk.Frame(self.players_tab, bg=P["bg"])
+        sortbar = chat_ui.Flow(self.players_tab, P["bg"])
         sortbar.pack(fill="x", padx=14, pady=(6, 4))
-        tk.Label(sortbar, text="Sort by", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
-                                                                                              padx=(4, 8))
+        sortbar.add(tk.Label(sortbar, text="Sort by", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9), padx=4))
         self.sort_chips = {}
         for col, label in (("current", "Xbox list"), ("last_seen", "Last seen"), ("hours", "Hours"),
                            ("gamertag", "Name"), ("twitch", "Twitch"), ("tags", "Tags")):
-            b = pill(sortbar, label, lambda c=col: self.sort_by(c), padx=12, pady=5)
-            b.pack(side="left", padx=3)
+            b = sortbar.add(pill(sortbar, label, lambda c=col: self.sort_by(c), padx=12, pady=5))
             b.label = label
             self.sort_chips[col] = b
-        pill(sortbar, "Reset view", self.reset_table, padx=12, pady=5).pack(side="right", padx=3)
+        reset_pill = pill(sortbar, "Reset view", self.reset_table, padx=12, pady=5)
+        self.hide_crew = self.db.get_setting("hide_crew", "1") == "1"
+        self.crew_btn = pill(sortbar, "", self.toggle_crew, padx=12, pady=5)
+        self._crew_button()
         self.fields_btn = pill(sortbar, "Show on cards  ▾", self._fields_menu, padx=12, pady=5)
-        self.fields_btn.pack(side="right", padx=3)
+        self.list_view = self.db.get_setting("list_view", "cards")
+        if self.list_view not in self.VIEW_NAMES:
+            self.list_view = "cards"
+        self.view_var = tk.StringVar(value=self.VIEW_NAMES[self.list_view])
+        self.view_box = chat_ui.PillSelect(sortbar, P, P["bg"], self.view_var, values=list(self.VIEW_NAMES.values()),
+                                           on_change=lambda: self.set_list_view(
+                                               {v: k for k, v in self.VIEW_NAMES.items()}[self.view_var.get()]),
+                                           extra=[("Hide search and sort  (Ctrl+F shows them)",
+                                                   lambda: self.show_bars(False))],
+                                           prefix="View: ", padx=12, pady=5)
+        self._pills.append(self.view_box)
+        for b in (self.view_box, self.fields_btn, self.crew_btn, reset_pill):
+            sortbar.add(b, right=True)
+        self.bars = (bar2, sortbar)
 
         cols = ("gamertag", "hours", "xuid", "tags", "twitch", "last_seen", "origin", "current")
         self.tree = chat_ui.PlayerCards(self.players_tab, P, cols)
         self.col_titles = {"gamertag": "Gamertag", "hours": "Hours in SoT", "xuid": "XUID", "tags": "Tags",
                            "twitch": "Twitch", "last_seen": "Last seen", "origin": "Source", "current": "#"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
+        saved = self.db.get_setting("player_sort", "").split(":")        # the sort you picked last time
+        if len(saved) == 2 and saved[0] in self.SORT_KEYS:
+            self.sort_col, self.sort_desc = saved[0], saved[1] == "1"
         for c, w in self.COL_WIDTHS.items():
             self.tree.column(c, width=w)
         self._apply_hidden_columns()
         self._update_headings()
         self.tree.tag_configure("friend", background=self.pal["friend"])
         self.tree.tag_configure("odd", background=self.pal["stripe"])
+        self.tree.set_view(self.list_view)
         self.tree.pack(fill="both", expand=True, padx=(6, 8), pady=(2, 0))
+        self.bars_shown = True
+        if self.db.get_setting("show_bars", "1") == "0":
+            self.show_bars(False, quiet=True)
+        r.bind("<Control-f>", lambda e: (self._show_page("players"), self.show_bars(True),
+                                         self.search_box.inner.focus_set()))
         self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", lambda e: None if self._twitch_cell(e) else self.open_selected())
         self.tree.bind("<Return>", lambda e: self.open_selected())
@@ -457,16 +518,20 @@ class App(SharedListMixin):
         self.spinner.pack(side="left", padx=(0, 6))
         self.count_lbl = ttk.Label(statusbar, text="")
         self.count_lbl.pack(side="right")
-        legend = tk.Label(statusbar, text=" Friend ", bg=self.pal["friend"], fg=self.pal["fg"], font=("Segoe UI", 8))
+        legend = tk.Label(statusbar, text=" Friend ", fg=self.pal["fg"], font=("Segoe UI", 8),
+                          bg=chat_ui.friend_shade(chat_ui._mix(self.pal["bg"], self.pal["panel"], 0.85)))
         legend.pack(side="right", padx=(0, 10))
         self.legend = legend
         ttk.Label(statusbar, image=self.twitch_img, text=" live now", compound="left",
                   style="Hint.TLabel").pack(side="right", padx=(0, 10))
         ttk.Label(statusbar, text="Right-click a player for more", style="Hint.TLabel").pack(side="right",
                                                                                             padx=(0, 14))
+        self.status_extras = [w for w in statusbar.winfo_children() if w is not self.spinner]   # hidden when slim
         self.status_lbl = ttk.Label(statusbar, textvariable=self.status, anchor="w")
         self.status_lbl.pack(side="left", fill="x", expand=True)
         self.set_status("Ready. Add an Xbox account (☰ menu) or import players.")
+        self.slim, self.slim_hooks = None, []
+        r.bind("<Configure>", lambda e: self._resized() if e.widget is r else None, add="+")
 
     # ---- helpers ----
     def set_status(self, text, error=False):
@@ -494,6 +559,7 @@ class App(SharedListMixin):
     def reset_table(self):
         """Back to the default view: Xbox list order, no search, all columns shown at their normal width."""
         self.sort_col, self.sort_desc = "current", False
+        self.db.set_setting("player_sort", "current:0")
         self.db.set_setting("hidden_columns", DEFAULT_HIDDEN)
         self._apply_hidden_columns()
         for c, w in self.COL_WIDTHS.items():
@@ -505,6 +571,7 @@ class App(SharedListMixin):
     def sort_by(self, col):
         self.sort_desc = not self.sort_desc if col == self.sort_col else (col == "last_seen")
         self.sort_col = col
+        self.db.set_setting("player_sort", f"{col}:{1 if self.sort_desc else 0}")
         self._update_headings()
         self.reload()
 
@@ -530,6 +597,9 @@ class App(SharedListMixin):
         now = time.time()
         rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()),
                       key=self.SORT_KEYS[self.sort_col], reverse=self.sort_desc)
+        if self.hide_crew:                                   # your crewmates aren't "recently met"
+            crew = self.db.CREW_TAG.casefold()
+            rows = [a for a in rows if crew not in [t.strip().casefold() for t in (a["tags"] or "").split(",")]]
         for n, a in enumerate(rows):
             friend = a["relation"] in ("Friend", "In your list")
             tw_live = twitch_live(a, now)                    # exact: Twitch itself says this saved channel is live
@@ -556,14 +626,42 @@ class App(SharedListMixin):
         self.count_lbl.configure(text=f"{self.db.count_accounts()} unique accounts")
         self._shown_xuids = [a["xuid"] for a in rows[:150] if a["xuid"]]       # for the pictures/hours round
 
+    VIEW_NAMES = {"cards": "Cards", "compact": "Compact", "rows": "Rows"}
+    VIEW_PICTURE = {"cards": chat_ui.PICTURE_SIZE, "compact": 32, "rows": 0}
+
+    def set_list_view(self, view):
+        """Cards, Compact (one line, small picture) or Rows (thin, no pictures); remembered."""
+        self.list_view = view
+        self.db.set_setting("list_view", view)
+        self.view_var.set(self.VIEW_NAMES[view])
+        self.tree.set_view(view)
+        self.reload()
+
+    def show_bars(self, on, quiet=False):
+        """Show or hide the search box and the sort row above the list (remembered; Ctrl+F shows them)."""
+        if on == self.bars_shown:
+            return
+        self.bars_shown = on
+        self.db.set_setting("show_bars", "1" if on else "0")
+        for w in self.bars:
+            if on:
+                w.pack(fill="x", padx=14, pady=(12, 4) if w is self.bars[0] else (6, 4), before=self.tree)
+            else:
+                w.pack_forget()
+        if not quiet:
+            self.set_status("Search and sort are shown." if on else
+                            "Search and sort are hidden: Ctrl+F (or ☰ → List view) shows them again.")
+
     def _row_picture(self, raw, live):
         """The round profile picture for a row, with a small Twitch badge when live ("" = nothing)."""
-        img = self.pictures.get(raw, lambda raw=raw: self._picture_ready(raw)) if raw else None
+        size = self.VIEW_PICTURE.get(getattr(self, "list_view", "cards"), chat_ui.PICTURE_SIZE)
+        if not size:
+            return ""
+        img = self.pictures.get(raw, lambda raw=raw: self._picture_ready(raw), size=size) if raw else None
         if not live:
             return img or ""
-        k = (raw if img is not None else "", "live")
+        k = (raw if img is not None else "", "live", size)
         if k not in self._badged:
-            size = chat_ui.PICTURE_SIZE
             out = tk.PhotoImage(width=size, height=size)
             if img is not None:
                 out.tk.call(out, "copy", img)
@@ -672,7 +770,6 @@ class App(SharedListMixin):
              self.remove_friend_selected if following else self.add_friend_selected, xbox_ok),
             ("Xbox messages...", self.message_selected, xbox_ok),
             ("Open Xbox profile", self.xbox_profile_selected, one),
-            ("Invite / join in Game Bar", self.invite_or_join, one),
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
@@ -752,6 +849,93 @@ class App(SharedListMixin):
         return tk.Menu(parent or self.root, tearoff=0, bg=P["panel"], fg=P["fg"], selectcolor=P["fg"], bd=0,
                        activebackground=P["accent"], activeforeground=P["bg"], font=("Segoe UI", 9))
 
+    KEEP_DAYS = 14
+
+    def keep_days(self) -> int:
+        try:
+            return max(0, int(self.db.get_setting("keep_days", str(self.KEEP_DAYS))))
+        except ValueError:
+            return self.KEEP_DAYS
+
+    def set_keep_days(self, days):
+        self.db.set_setting("keep_days", str(int(days)))
+        self.db.set_setting("pruned_at", "0")
+        self.set_status("Players are kept for good now." if not days else
+                        f"Players not seen for {days} days are forgotten (tags, your unshared Twitch links and "
+                        "the shared list are kept). Cleaning up now...")
+        if days:
+            self.root.after(500, self._prune_round)
+
+    # ---- your crew (Microsoft sign-in): who is on your ship, crewmates tagged and hidden from the list
+    def toggle_crew(self):
+        self.hide_crew = not self.hide_crew
+        self.db.set_setting("hide_crew", "1" if self.hide_crew else "0")
+        self._crew_button()
+        self.reload()
+        self.set_status("Crewmates (tag 'crew') are hidden from the list." if self.hide_crew else
+                        "Crewmates are shown in the list.")
+
+    def _crew_button(self):
+        self.crew_btn.set_text("Crew hidden" if self.hide_crew else "Crew shown")
+        self.crew_btn.set_kind("accent" if self.hide_crew else "soft")
+
+    fetch_crew = staticmethod(lambda key: social.my_crew(key))
+
+    def _crew_round(self):
+        """After a refresh: who is on your ship. People you sail with in 2+ sessions get the tag crew."""
+        key, owner = self.xkey.get(), self.xkey.active()
+        if not direct.is_ms_key(key) or getattr(self, "_crew_busy", False) or self.closing:
+            return
+        self._crew_busy = True
+
+        def work():
+            try:
+                res, err = self.fetch_crew(key), None
+            except ProviderError as e:
+                res, err = None, str(e)
+            except Exception as e:                       # never let a worker thread die silently
+                res, err = None, f"Unexpected error: {e}"
+            self.q.put(("call", lambda: done(res, err)))
+
+        def done(res, err):
+            self._crew_busy = False
+            if err or key != self.xkey.get():
+                return                                   # quiet: the next refresh tries again
+            self.crew_now = res
+            if not res:
+                self.crew_var.set("")
+                return self.crew_line.pack_forget()
+            names = [m["gamertag"] for m in res["members"]]
+            self.crew_var.set(f"⚓  Your {res['ship']}: " + (", ".join(names) if names else "just you"))
+            self.crew_line.pack(fill="x", padx=18, pady=(10, 0), before=self.search_box.master)
+            newly = self.db.note_crew(owner, res["session"], res["members"])
+            if newly:
+                self.reload()
+                self.set_status(f"Crewmate(s) found: {', '.join(newly)} (tagged crew"
+                                + (", hidden from the list" if self.hide_crew else "") + "; untag to show again).")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _prune_round(self):
+        """Once a day (and at start): forget old players and unused pictures, so the data stays small."""
+        if self.closing:
+            return
+        self.root.after(6 * 3600 * 1000, self._prune_round)
+        days = self.keep_days()
+        now = int(time.time())
+        if not days or now - int(self.db.get_setting("pruned_at", "0") or 0) < 86400:
+            return
+        self.db.set_setting("pruned_at", str(now))
+        try:
+            gone = self.db.prune(days, now)
+            pics = self.pictures.prune(days, now)
+        except Exception as e:                           # cleaning up must never break the app
+            return self.set_status(f"Cleaning up old players failed: {e}", error=True)
+        if gone:
+            self.reload()
+            self.set_status(f"Forgot {gone} player(s) not seen for {days} days"
+                            + (f" and {pics} unused picture(s)" if pics else "")
+                            + ". Tagged players, your unshared Twitch links and the shared list are kept.")
+
     def _main_menu(self):
         """☰: accounts, import/export, Twitch and shared list, theme and updates."""
         m = self._menu()
@@ -774,6 +958,21 @@ class App(SharedListMixin):
             themes.add_radiobutton(label=t[0], value=i, variable=self.theme_choice,
                                    command=lambda i=i: self.set_theme(i))
         m.add_cascade(label="Theme", menu=themes)
+        keep = self._menu(m)
+        self.keep_choice = tk.IntVar(value=self.keep_days())
+        for d, label in ((7, "1 week"), (14, "2 weeks"), (30, "1 month"), (90, "3 months"), (0, "Never")):
+            keep.add_radiobutton(label=label, value=d, variable=self.keep_choice,
+                                 command=lambda d=d: self.set_keep_days(d))
+        m.add_cascade(label="Forget players not seen for", menu=keep)
+        views = self._menu(m)
+        for key, label in self.VIEW_NAMES.items():
+            views.add_radiobutton(label=label, value=label, variable=self.view_var,
+                                  command=lambda key=key: self.set_list_view(key))
+        views.add_separator()
+        self.bars_var = tk.BooleanVar(value=self.bars_shown)
+        views.add_checkbutton(label="Show search and sort", variable=self.bars_var,
+                              command=lambda: self.show_bars(self.bars_var.get()))
+        m.add_cascade(label="List view", menu=views)
         upd = self._menu(m)
         upd.add_command(label="Check now", command=lambda: threading.Thread(
             target=self._update_check, args=(True,), daemon=True).start())
@@ -808,7 +1007,14 @@ class App(SharedListMixin):
         key = self.xkey.get()
         if not key:
             return self.set_status("Add an OpenXBL account first.", error=True)
+        self._social_jobs = getattr(self, "_social_jobs", 0) + 1       # several can run at once
         self._set_busy("social", True)
+
+        def finished():
+            self._social_jobs -= 1
+            if self._social_jobs <= 0:
+                self._social_jobs = 0
+                self._set_busy("social", False)
 
         def run():
             try:
@@ -817,7 +1023,7 @@ class App(SharedListMixin):
                 res, err = None, str(e)
             except Exception as e:                  # never let a worker thread die silently
                 res, err = None, f"Unexpected error: {e}"
-            self.q.put(("call", lambda: (self._set_busy("social", False), done(res, err))))
+            self.q.put(("call", lambda: (finished(), done(res, err))))
         threading.Thread(target=run, daemon=True).start()
 
     def _one_player(self):
@@ -838,7 +1044,7 @@ class App(SharedListMixin):
             if err:
                 return self.set_status(f"Could not add {gt}: {err}", error=True)
             self.db.set_friend(self.xkey.active() or "", xuid, "You follow")
-            self.set_status(f"Added {gt} as a friend on Xbox. It becomes mutual once they add you back.")
+            self.set_status(f"Added {gt} on Xbox: you're friends once they accept (or add you back).")
             self.reload()
             if after:
                 after()
@@ -850,7 +1056,8 @@ class App(SharedListMixin):
             if not p or not p[1]:
                 return self.set_status("Select one player with an XUID first.", error=True)
             gt, xuid = p
-        if not messagebox.askyesno("Remove friend", f"Remove {gt} from your Xbox friends?"):
+        if not self.ask_yes("Remove friend", f"Remove {gt} from your Xbox friends?", yes="Remove friend",
+                            danger=True):
             return
 
         def done(_, err):
@@ -913,23 +1120,6 @@ class App(SharedListMixin):
             self.set_status(text, error=err)
         threading.Thread(target=work, daemon=True).start()
 
-    def invite_or_join(self, gt=None):
-        """Xbox only offers game invites and joining inside its own UI: open Game Bar's Xbox Social widget and put
-        the gamertag on the clipboard to find the player there."""
-        if gt is None:
-            p = self._one_player()
-            if not p:
-                return self.set_status("Select one player first.", error=True)
-            gt = p[0]
-        self.root.clipboard_clear()
-        self.root.clipboard_append(gt)
-        if social.open_gamebar_social():
-            self.set_status(f"Game Bar opened ({gt} copied). In Xbox Social, right-click {gt}: Invite to game / "
-                            "Join game. Works while you play, if the game and their privacy settings allow it.")
-        else:
-            self.set_status(f"Couldn't open Game Bar ({gt} copied). Press Win+G, open Xbox Social and right-click "
-                            "the player: Invite to game / Join game.", error=True)
-
     def open_xbox_profile(self, gt, xuid):
         where = social.open_profile(gt, xuid)
         self.set_status(f"Opened {gt}'s profile " + ("in the Xbox app." if where == "app" else
@@ -943,8 +1133,8 @@ class App(SharedListMixin):
 
     def message_dialog(self, gt, xuid):
         """Chat with one player in its own window (see _chat_panel)."""
-        win = tk.Toplevel(self.root)
-        win.title(f"Messages: {gt}")
+        win = self._page(f"chat:{xuid}", f"✉  {gt}")
+        win.title(f"✉  {gt}")
         win.configure(bg=self.pal["bg"])
         panel = self._chat_panel(win, gt, xuid)
         panel.pack(fill="both", expand=True)
@@ -978,9 +1168,11 @@ class App(SharedListMixin):
                                     "their copy, and a new message brings the chat back.", "Delete chat", go)
 
     def _picture_of(self, xuid):
-        """The profile picture address of a player we've seen in an inbox, else ""."""
-        for res in self.inbox_cache.values():
-            for c in res.get("chats", []):
+        """The profile picture address of a player we've seen in chats, friends or requests, else ""."""
+        for res in list(self.inbox_cache.values()):
+            people = (res.get("chats", []) + res.get("received", []) + res.get("sent", [])
+                      if isinstance(res, dict) else res if isinstance(res, list) else [])
+            for c in people:
                 if c.get("xuid") == str(xuid) and c.get("pic"):
                     return c["pic"]
         return ""
@@ -1022,7 +1214,6 @@ class App(SharedListMixin):
                           command=lambda: self._delete_chat(panel, gt, state_["conv"], state_["horizon"],
                                                             after=changed))
             m.add_separator()
-            m.add_command(label="Invite / join in Game Bar", command=lambda: self.invite_or_join(gt))
             m.add_command(label="Copy gamertag", command=lambda: (self.root.clipboard_clear(),
                                                                   self.root.clipboard_append(gt)))
             m.tk_popup(more.winfo_rootx(), more.winfo_rooty() + more.winfo_height())
@@ -1130,121 +1321,412 @@ class App(SharedListMixin):
         send_btn.command = send
         box.bind("<Control-Return>", lambda e: (send(), "break")[1])
         panel.send, panel.box, panel.info, panel.load, panel.texts = send, box, info, load, view.texts
-        panel.view = view
+        panel.view, panel.head = view, head
         panel.delete_message = delete_message                   # for tests
         if cache_key in self.chat_cache:                        # what we had last time, at once; then fresh
             show(self.chat_cache[cache_key], None, cached=True)
         load()
         return panel
 
-    def inbox_dialog(self, goto=None):
-        """Messages: all your Xbox conversations on the left (newest first, unread marked, who is online), the chat
-        with the selected one on the right. Typing filters by name; Enter finds anyone on Xbox to start a new chat.
-        Right-click a conversation to mute or delete it. Needs an account signed in with Microsoft (OpenXBL's inbox
-        endpoints don't work). The last inbox is shown at once while a fresh one loads."""
-        if self.inbox_win is not None and self.inbox_win.winfo_exists():    # one Messages window: bring it up
+    def friends_dialog(self, goto=None):
+        """Friends & messages, on the Friends tab."""
+        return self.inbox_dialog(goto=goto, tab="friends")
+
+    def requests_dialog(self, goto=None):
+        """Friends & messages, on the Requests tab."""
+        return self.inbox_dialog(goto=goto, tab="requests")
+
+    def inbox_dialog(self, goto=None, tab="friends"):
+        """Friends & messages in one window. Left: tabs for your Xbox chats (newest first, unread marked), your
+        friends (online first, what they are doing) and friend requests; right: the chat with whoever is selected,
+        or for a request a card to accept or ignore it. Typing filters the tab; Enter finds anyone on Xbox. Right-
+        click a row for more. Chats and requests need an account signed in with Microsoft (OpenXBL has neither).
+        What was shown last time appears at once while a fresh copy loads."""
+        if self.inbox_win is not None and self.inbox_win.winfo_exists():    # one window: bring it up
             w = self.inbox_win
             w.deiconify()
             w.lift()
             w.focus_force()
+            w.show_tab(tab)
             w.goto(goto)
             return w
         P = self.pal
-        win = tk.Toplevel(self.root)
+        win = self._page("social", self.SOCIAL, closable=False)
         self.inbox_win = win
-        win.title("Messages")
+        win.title("Friends & messages")
         win.configure(bg=P["bg"])
         key_now = self.xkey.get() or ""
 
-        body = tk.Frame(win, bg=P["bg"])
+        # the list and the chat side by side; drag the line between them for a slim or a wide list (remembered)
+        body = tk.PanedWindow(win, orient="horizontal", bg=chat_ui._mix(P["panel"], P["fg"], 0.08), bd=0,
+                              sashwidth=5, sashrelief="flat", showhandle=False, opaqueresize=True, sashcursor="sb_h_double_arrow")
         body.pack(fill="both", expand=True)
-        left = tk.Frame(body, bg=P["panel"], width=340)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
+        try:
+            left_w = max(260, min(700, int(self.db.get_setting("social_list_width", "350"))))
+        except ValueError:
+            left_w = 350
+        left = tk.Frame(body, bg=P["panel"], width=left_w)
+        body.add(left, minsize=260, width=left_w, stretch="never")
+
+        def remember_width(_=None):
+            try:
+                self.db.set_setting("social_list_width", str(int(left.winfo_width())))
+            except (tk.TclError, ValueError):
+                pass
+        body.bind("<ButtonRelease-1>", lambda e: body.after(50, remember_width), add="+")
         top = tk.Frame(left, bg=P["panel"])
         top.pack(fill="x", padx=14, pady=(14, 2))
-        tk.Label(top, text="Messages", bg=P["panel"], fg=P["fg"], font=("Segoe UI", 15, "bold")).pack(side="left")
-        chat_ui.RoundButton(top, "↻", lambda: load(), P, P["panel"], padx=11).pack(side="right")
-        info = tk.StringVar(value="Loading your inbox...")
+        tk.Label(top, text="Friends & messages", bg=P["panel"], fg=P["fg"], font=("Segoe UI", 14, "bold")).pack(
+            side="left")
+        chat_ui.RoundButton(top, "↻", lambda: load_all(), P, P["panel"], padx=11).pack(side="right")
+        tabs = chat_ui.Tabs(left, P, P["panel"], ("chats", "friends", "requests"), lambda t: switch(t))
+        tabs.pack(fill="x", padx=12, pady=(10, 0))
+        info = tk.StringVar(value="Loading...")
         tk.Label(left, textvariable=info, bg=P["panel"], fg=P["muted"], font=("Segoe UI", 8), anchor="w").pack(
-            fill="x", padx=16)
+            fill="x", padx=16, pady=(8, 0))
         query = tk.StringVar()
 
         def make_entry(parent_, bg):
             return tk.Entry(parent_, textvariable=query, bg=bg, fg=P["fg"], insertbackground=P["fg"], relief="flat",
                             bd=0, font=("Segoe UI", 10), highlightthickness=0)
         sbox = chat_ui.RoundBox(left, P, P["panel"], make_entry, height=38, radius=19)
-        sbox.pack(fill="x", padx=12, pady=(10, 8))
+        sbox.pack(fill="x", padx=12, pady=(8, 8))
         entry = sbox.inner
 
-        chats, state = [], {"results": None, "term": "", "placeholder": False, "panel": None, "open": None,
-                            "goto": goto}
-        hint = "Search chats, or Enter to find anyone on Xbox"
+        data = {"chats": [], "friends": [], "received": [], "sent": [], "groups": 0, "ships": {}}
+        errs = {"chats": None, "friends": None, "requests": None}
+        loaded = set()
+        state = {"tab": tab if tab in ("chats", "friends", "requests") else "chats", "results": None, "term": "",
+                 "placeholder": False, "panel": None, "open": None, "goto": goto}
+        hints = {"chats": "Search chats, or Enter to find anyone on Xbox",
+                 "friends": "Search friends, or Enter to find anyone on Xbox",
+                 "requests": "Search requests, or Enter to find anyone on Xbox"}
 
-        def row_menu(c, e):
-            name = c["gamertag"] if not str(c["gamertag"]).isdigit() else "this player"
+        def name_of(r):
+            return r["gamertag"] if not str(r["gamertag"]).isdigit() else "this player"
+
+        def request_of(xuid):
+            for side in ("received", "sent"):
+                for f in data[side]:
+                    if f["xuid"] == xuid:
+                        return f, side
+            return None, None
+
+        def friend_of(xuid):
+            return next((f for f in data["friends"] if f["xuid"] == xuid), None)
+
+        def presence(f):
+            ship = data["ships"].get(f["xuid"])
+            if ship and f["state"].casefold() == "online":
+                aboard = [m["gamertag"] for m in ship.get("crew") or [] if m["xuid"] != f["xuid"]]
+                return ("⚓ " + social.ship_label(ship) + (" · with " + ", ".join(aboard) if aboard else "")
+                        + (f" · {f['text']}" if f["text"] and not aboard else ""))
+            if f["state"].casefold() == "online":
+                return f["text"] or "Online"
+            if f.get("last_seen"):
+                return "last seen " + chat_ui.ago_label(f["last_seen"])
+            return f["text"] or ("" if f["state"] in ("Unknown", "Offline") else f["state"])
+
+        # ---- right-click menus
+        def row_menu(r, e):
             m = self._menu(win)
-            ok = "normal" if c.get("conversation") else "disabled"
-            m.add_command(label="Unmute chat" if c.get("muted") else "Mute chat", state=ok,
-                          command=lambda: self._mute_chat(name, c["conversation"], not c.get("muted"), after=load))
-            m.add_command(label="Delete chat...", state="normal" if c.get("horizon") else "disabled",
-                          command=lambda: setattr(win, "confirm", self._delete_chat(
-                              body, name, c["conversation"], c["horizon"], after=deleted(c))))
-            m.add_separator()
-            m.add_command(label="SOTREP", command=lambda: webbrowser.open(sotrep.profile_url(c["gamertag"])),
-                          state="disabled" if str(c["gamertag"]).isdigit() else "normal")
-            m.add_command(label="Xbox profile", command=lambda: self.open_xbox_profile(c["gamertag"], c["xuid"]))
+            name = name_of(r)
+            req, side = request_of(r["xuid"]) if state["tab"] == "requests" else (None, None)
+            if side == "received":
+                m.add_command(label="Accept friend request", command=lambda: answer(req, True))
+                m.add_command(label="Ignore request", command=lambda: answer(req, False))
+                m.add_separator()
+            elif side == "sent":
+                m.add_command(label="Cancel friend request...", command=lambda: cancel_request(req))
+                m.add_separator()
+            if state["tab"] == "chats" and r.get("conversation"):
+                m.add_command(label="Unmute chat" if r.get("muted") else "Mute chat",
+                              command=lambda: self._mute_chat(name, r["conversation"], not r.get("muted"),
+                                                              after=load_chats))
+                m.add_command(label="Delete chat...", state="normal" if r.get("horizon") else "disabled",
+                              command=lambda: setattr(win, "confirm", self._delete_chat(
+                                  body, name, r["conversation"], r["horizon"], after=deleted(r))))
+                m.add_separator()
+            if state["tab"] != "chats" or not r.get("conversation"):
+                m.add_command(label="Message", command=lambda: (lst.select(r["xuid"], notify=False), open_chat(r)))
+            m.add_command(label="SOTREP", command=lambda: webbrowser.open(sotrep.profile_url(r["gamertag"])),
+                          state="disabled" if str(r["gamertag"]).isdigit() else "normal")
+            m.add_command(label="Xbox profile", command=lambda: self.open_xbox_profile(r["gamertag"], r["xuid"]))
+            f = friend_of(r["xuid"])
+            if side is None:
+                m.add_separator()
+                if f is not None and f["relation"] in self.FOLLOWING:
+                    m.add_command(label="Remove friend...", command=lambda: remove_friend(f))
+                else:
+                    m.add_command(label="Add friend", command=lambda: self.add_friend_selected(
+                        r["gamertag"], r["xuid"], after=load_friends))
+            win.row_menu_widget = m
             m.tk_popup(e.x_root, e.y_root)
 
         def deleted(c):
             def after():
-                if state["open"] == c["xuid"] and state["panel"] is not None:
-                    state["panel"].destroy()
-                    state["panel"], state["open"], win.panel = None, None, None
-                    empty.pack(expand=True)
-                load()
+                if state["open"] == ("chat", c["xuid"]):
+                    close_panel()
+                load_chats()
             return after
 
-        def open_chat(c):
-            if state["open"] == c["xuid"] and state["panel"] is not None:
+        def remove_friend(f):
+            name = name_of(f)
+
+            def go():
+                def done(_, err):
+                    if err:
+                        return self.set_status(f"Could not remove {name}: {err}", error=True)
+                    self.db.set_friend(self.xkey.active() or "", f["xuid"], None)
+                    self.set_status(f"Removed {name} from your Xbox friends.")
+                    self.reload()
+                    load_friends()
+                self._xbox_bg(lambda k: social.remove_friend(k, f["xuid"]), done)
+            win.confirm = chat_ui.confirm_card(body, P, f"Remove {name} from your Xbox friends?", "Remove friend", go)
+
+        # ---- friend requests
+        def answer(f, accept):
+            name = name_of(f)
+
+            def done(_, err):
+                if err:
+                    msg = f"Could not {'accept' if accept else 'ignore'} {name}'s request: {err}"
+                    self.set_status(msg, error=True)
+                    if win.winfo_exists() and state["open"] == ("req", f["xuid"]) and state["panel"] is not None:
+                        state["panel"].note.set(msg)
+                    return
+                self.set_status(f"You and {name} are now friends on Xbox." if accept
+                                else f"Ignored {name}'s friend request.")
+                if accept:
+                    self.db.set_friend(self.xkey.active() or "", f["xuid"], "Friend")
+                    self.reload()
+                self._request_answered(f["xuid"])
+                if not win.winfo_exists():
+                    return
+                data["received"] = [x for x in data["received"] if x["xuid"] != f["xuid"]]
+                if state["open"] == ("req", f["xuid"]):
+                    if accept:
+                        lst.select(f["xuid"], notify=False)
+                        open_chat(dict(f, relation="Friend"), force=True)
+                    else:
+                        close_panel()
+                render()
+                load_requests()
+                if accept:
+                    load_friends()
+            self._xbox_bg(lambda k: (social.accept_friend if accept else social.ignore_friend)(k, f["xuid"]), done)
+
+        def cancel_request(f):
+            name = name_of(f)
+
+            def go():
+                def done(_, err):
+                    if err:
+                        return self.set_status(f"Could not cancel the request to {name}: {err}", error=True)
+                    self.set_status(f"Cancelled your friend request to {name}.")
+                    if win.winfo_exists():
+                        if state["open"] == ("req", f["xuid"]):
+                            close_panel()
+                        load_requests()
+                self._xbox_bg(lambda k: social.ignore_friend(k, f["xuid"]), done)
+            win.confirm = chat_ui.confirm_card(body, P, f"Cancel your friend request to {name}?", "Cancel request", go)
+
+        # ---- the right side: a chat, a request card, or nothing
+        def close_panel():
+            if state["panel"] is not None:
+                state["panel"].destroy()
+            state["panel"], state["open"], win.panel = None, None, None
+            lst.selected = None
+            empty.pack(expand=True)
+            if win.winfo_exists() and hasattr(win, "show_list"):
+                arrange()
+
+        def show_panel(kind, xuid, make):
+            if state["open"] == (kind, xuid) and state["panel"] is not None:
                 return
             if state["panel"] is not None:
                 state["panel"].destroy()
             empty.pack_forget()
-            state["open"] = c["xuid"]
-            name = c["gamertag"] if not str(c["gamertag"]).isdigit() else "Unknown player"
-            state["panel"] = self._chat_panel(right, name, c["xuid"], on_sent=load, on_changed=load,
-                                              pic=c.get("pic", ""))
+            state["open"] = (kind, xuid)
+            state["panel"] = make()
             state["panel"].pack(fill="both", expand=True)
             win.panel = state["panel"]
+            arrange()
 
-        lst = chat_ui.ConversationList(left, P, on_select=open_chat, on_menu=row_menu, pictures=self.pictures)
+        def open_chat(c, force=False):
+            if force:
+                state["open"] = None
+            name = c["gamertag"] if not str(c["gamertag"]).isdigit() else "Unknown player"
+            show_panel("chat", c["xuid"], lambda: self._chat_panel(right, name, c["xuid"], on_sent=load_chats,
+                                                                    on_changed=load_chats, pic=c.get("pic", "")))
+
+        def open_request(f, side):
+            show_panel("req", f["xuid"], lambda: self._request_card(
+                right, f, side, accept=lambda: answer(f, True), ignore=lambda: answer(f, False),
+                cancel=lambda: cancel_request(f),
+                message=lambda: (state.update(open=None), open_chat(f))))
+
+        def on_select(r):
+            req, side = request_of(r["xuid"]) if state["tab"] == "requests" else (None, None)
+            if req is not None:
+                open_request(req, side)
+            else:
+                open_chat(r)
+
+        lst = chat_ui.ConversationList(left, P, on_select=on_select, on_menu=row_menu, pictures=self.pictures)
         lst.pack(fill="both", expand=True, pady=(0, 6))
         right = tk.Frame(body, bg=P["bg"])
-        right.pack(side="left", fill="both", expand=True)
-        empty = tk.Label(right, text="Pick a conversation", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 11))
+        body.add(right, minsize=380, stretch="always")
+        win.panes = body                                         # for tests
+        back = chat_ui.RoundButton(right, "‹  Back", lambda: show_list(), P, P["bg"], padx=12, pady=5)
+        cols = {"one": False}
+
+        def columns(width):
+            one = width < self.ONE_COLUMN
+            if one != cols["one"]:
+                cols["one"] = one
+                if one:
+                    body.paneconfigure(left, minsize=200)
+                    body.paneconfigure(right, minsize=200)
+                arrange()
+
+        def arrange():
+            if not win.winfo_exists():
+                return
+            panes = [str(p) for p in body.panes()]
+            showing_chat = state["panel"] is not None and cols["one"]
+            want = [right] if showing_chat else [left] if cols["one"] else [left, right]
+            if [str(w) for w in want] != panes:
+                for w in (left, right):
+                    if str(w) in panes:
+                        body.forget(w)
+                for w in want:
+                    body.add(w, minsize=200 if cols["one"] else (260 if w is left else 380),
+                             stretch="always" if (w is right or cols["one"]) else "never",
+                             **({} if cols["one"] or w is right else {"width": left_w}))
+            panel = state["panel"]
+            head = getattr(panel, "head", None) if panel is not None else None
+            if showing_chat and head is not None:              # a chat: Back sits in its header
+                back.place_forget()
+                if getattr(panel, "back", None) is None:
+                    panel.back = chat_ui.RoundButton(head, "‹", show_list, P, P["head"], padx=10, pady=5)
+                    panel.back.pack(side="left", padx=(10, 0), before=head.winfo_children()[0])
+            elif showing_chat:                                 # a request card: Back at the top left
+                back.place(x=8, y=8)
+                back.tk.call("raise", back._w)
+            else:
+                back.place_forget()
+                if panel is not None and getattr(panel, "back", None) is not None:
+                    panel.back.destroy()
+                    panel.back = None
+
+        def show_list():
+            close_panel()
+            arrange()
+        win.show_list, win.columns = show_list, columns
+        self.slim_hooks.append(columns)
+        empty = tk.Label(right, text="Pick a chat, a friend or a request", bg=P["bg"], fg=P["muted"],
+                         font=("Segoe UI", 11))
         empty.pack(expand=True)
 
+        # ---- what the list shows
         def typed():
             return "" if state["placeholder"] else query.get().strip()
 
+        def matches(r, q):
+            return not q or q in str(r["gamertag"]).casefold()
+
         def shown_rows():
             q = " ".join(typed().casefold().split())
-            shown = [c for c in chats if not q or q in str(c["gamertag"]).casefold()]
-            rows = [dict(c, kind="chat") for c in shown]
+            t, rows = state["tab"], []
+            if errs[t] and t not in loaded:
+                rows.append({"kind": "note", "text": "Couldn't load this: see the line above."})
+            elif t not in loaded:
+                rows.append({"kind": "note", "text": "Loading..."})
+            elif t == "chats":
+                shown = [c for c in data["chats"] if matches(c, q)]
+                rows += [dict(c, kind="chat") for c in shown]
+                if not data["chats"]:
+                    rows.append({"kind": "note", "text": "No chats yet: Enter finds anyone on Xbox"})
+                elif q and not shown and state["results"] is None:
+                    rows.append({"kind": "note", "text": "no chat matches: Enter searches Xbox"})
+            elif t == "friends":
+                shown = [f for f in data["friends"] if matches(f, q)]
+                on = [f for f in shown if f["state"].casefold() == "online"]
+                off = [f for f in shown if f["state"].casefold() != "online"]
+                for title, part in ((f"ONLINE — {len(on)}", on), (f"OFFLINE — {len(off)}", off)):
+                    if part:
+                        rows.append({"kind": "header", "text": title})
+                        rows += [dict(f, kind="chat", preview=presence(f), at=None, unread=False, mine=False,
+                                      aside=("★" if f["favorite"] else "")
+                                      + ("" if f["relation"] == "Friend" else ("  " if f["favorite"] else "")
+                                         + f["relation"].lower())) for f in part]
+                if not data["friends"]:
+                    rows.append({"kind": "note", "text": "No friends in your list yet"})
+                elif q and not shown and state["results"] is None:
+                    rows.append({"kind": "note", "text": "no friend matches: Enter searches Xbox"})
+            else:
+                rec = [f for f in data["received"] if matches(f, q)]
+                sent = [f for f in data["sent"] if matches(f, q)]
+                if rec:
+                    rows.append({"kind": "header", "text": f"WANT TO BE YOUR FRIEND — {len(rec)}"})
+                    rows += [dict(f, kind="chat", preview="wants to be friends · " + (presence(f) or "on Xbox"),
+                                  unread=True, mine=False, aside=chat_ui.when_label(f.get("at"))) for f in rec]
+                if sent:
+                    rows.append({"kind": "header", "text": f"SENT BY YOU — {len(sent)}"})
+                    rows += [dict(f, kind="chat", preview="waiting for an answer · " + (presence(f) or "on Xbox"),
+                                  unread=False, mine=False, aside=chat_ui.when_label(f.get("at"))) for f in sent]
+                if not data["received"] and not data["sent"]:
+                    rows.append({"kind": "note", "text": "No friend requests right now"})
+                elif q and not rec and not sent and state["results"] is None:
+                    rows.append({"kind": "note", "text": "no request matches: Enter searches Xbox"})
             if state["results"] is not None:
-                rows.append({"kind": "header", "text": f"NEW CHAT — \"{state['term']}\""})
-                have = {c["xuid"] for c in chats}
-                extra = [dict(r, kind="chat", preview="", at=None, mine=False, unread=False) for r in state["results"]
+                rows.append({"kind": "header", "text": f"ON XBOX — \"{state['term']}\""})
+                have = {r["xuid"] for r in (data["chats"] if t == "chats" else data["friends"] if t == "friends"
+                                            else data["received"] + data["sent"])}     # already in this tab
+                extra = [dict(r, kind="chat", preview=r["relation"].lower() if r["relation"] != "Not in your list"
+                              else presence(r), at=None, mine=False, unread=False) for r in state["results"]
                          if r["xuid"] not in have]
                 rows += extra or [{"kind": "note", "text": "nobody else found"}]
-            elif q and not shown:
-                rows.append({"kind": "note", "text": "no chat matches: Enter searches Xbox"})
             return rows
 
         def render():
-            lst.selected = state["open"]
+            lst.selected = state["open"][1] if state["open"] else None
             lst.set(shown_rows())
+            unread = sum(1 for c in data["chats"] if c.get("unread") and not c.get("muted"))
+            tabs.set_label("chats", f"Chats · {unread}" if unread else "Chats")
+            tabs.set_label("friends", "Friends" + (f" · {sum(1 for f in data['friends'] if f['state'].casefold() == 'online')}"
+                                                   if data["friends"] else ""))
+            tabs.set_label("requests", f"Requests · {len(data['received'])}" if data["received"] else "Requests")
+            tabs.mark("requests", bool(data["received"]))
+            summary()
+
+        def summary():
+            t = state["tab"]
+            if errs[t]:
+                return info.set(errs[t])
+            who = f" · {self.xkey.active() or ''}"
+            if t not in loaded:
+                return info.set("Loading..." + who)
+            if t == "chats":
+                unread = sum(1 for c in data["chats"] if c.get("unread") and not c.get("muted"))
+                info.set(f"{len(data['chats'])} chats" + (f" · {unread} unread" if unread else "")
+                         + (f" · {data['groups']} group chat(s) not shown" if data["groups"] else "") + who)
+            elif t == "friends":
+                n_on = sum(1 for f in data["friends"] if f["state"].casefold() == "online")
+                info.set(f"{n_on} online · {len(data['friends'])} in your list" + who)
+            else:
+                info.set(f"{len(data['received'])} waiting for you · {len(data['sent'])} sent" + who)
+
+        def switch(t):
+            if t == state["tab"]:
+                return
+            state["tab"] = t
+            tabs.select(t)
+            if state["placeholder"]:
+                query.set(hints[t])
+            render()
+        win.show_tab = lambda t: switch(t) if t in hints else None
 
         def on_type(*_):
             if state["placeholder"]:
@@ -1266,7 +1748,6 @@ class App(SharedListMixin):
                 if err:
                     return info.set(f"Xbox search failed: {err}")
                 state["results"], state["term"] = res, term
-                summary()
                 render()
             self._xbox_bg(lambda k: social.search_players(k, term), found)
         entry.bind("<Return>", search)
@@ -1276,7 +1757,7 @@ class App(SharedListMixin):
             if on and not query.get():
                 state["placeholder"] = True
                 entry.configure(fg=P["muted"])
-                query.set(hint)
+                query.set(hints[state["tab"]])
             elif not on and state["placeholder"]:
                 query.set("")
                 state["placeholder"] = False
@@ -1284,271 +1765,266 @@ class App(SharedListMixin):
         entry.bind("<FocusIn>", lambda e: placeholder(False), add="+")
         entry.bind("<FocusOut>", lambda e: placeholder(True), add="+")
 
-        def summary(extra=""):
-            unread = sum(1 for c in chats if c.get("unread") and not c.get("muted"))
-            info.set(f"{len(chats)} conversations" + (f" · {unread} unread" if unread else "")
-                     + f" · {self.xkey.active() or ''}" + extra)
+        # ---- loading (each part on its own, so one failing doesn't hide the others)
+        def got(part, apply, cache=True):
+            def done(res, err, cached=False):
+                if not win.winfo_exists():
+                    return
+                if err:
+                    errs[part] = err
+                    return render()
+                errs[part] = None
+                if cache and not cached:
+                    self.inbox_cache[(key_now, part)] = res
+                apply(res)
+                loaded.add(part)
+                render()
+                if state["goto"] and not cached and part == state["tab"]:     # opened from a pop-up: show that one
+                    xuid, state["goto"] = state["goto"], None
+                    lst.select(xuid)
+            return done
 
-        def show(res, err, cached=False):
-            if not win.winfo_exists():
-                return
-            if err:
-                return info.set(err)
-            if not cached:
-                self.inbox_cache[key_now] = res
-            chats[:] = res["chats"]
-            summary((f" · {res['groups']} group chat(s) not shown" if res["groups"] else "")
-                    + (" · updating..." if cached else ""))
-            render()
-            if state["goto"] and not cached:                    # opened from a pop-up: show that chat
-                lst.select(state["goto"])
-                state["goto"] = None
+        def apply_chats(res):
+            data["chats"], data["groups"] = res["chats"], res["groups"]
+            self.inbox_cache[key_now] = res                    # for _picture_of
 
-        def load():
-            self._xbox_bg(social.inbox, show)
+        def apply_friends(res):
+            data["friends"] = res
+            owner = self.xkey.active()
+            if owner:
+                self.db.replace_friends(owner, {f["xuid"]: f["relation"] for f in res})
+                self.reload()
 
-        def goto_chat(xuid):
+        def apply_requests(res):
+            data["received"], data["sent"] = res["received"], res["sent"]
+            self._requests_seen(res["received"])
+
+        show_chats, show_friends, show_requests = (got("chats", apply_chats), got("friends", apply_friends),
+                                                   got("requests", apply_requests))
+
+        def load_chats():
+            self._xbox_bg(social.inbox, show_chats)
+
+        def load_friends():
+            self._xbox_bg(social.friend_list, show_friends)
+            if direct.is_ms_key(self.xkey.get()):
+                self._xbox_bg(social.ships, got_ships)
+
+        def got_ships(res, err):
+            if win.winfo_exists() and not err:                # quiet when it fails: the list still works
+                data["ships"] = res
+                render()
+
+        def load_requests():
+            self._xbox_bg(social.friend_requests, show_requests)
+
+        def load_all():
+            load_chats()
+            load_friends()
+            load_requests()
+
+        def goto_one(xuid):
             state["goto"] = xuid
-            load()
-        win.goto = goto_chat
+            {"chats": load_chats, "friends": load_friends, "requests": load_requests}[state["tab"]]()
+        win.goto = goto_one
+        tabs.select(state["tab"])
         placeholder(True)
-        win.info, win.query, win.search, win.entry, win.list = info, query, search, entry, lst   # for tests
-        win.row_menu, win.confirm = row_menu, None
+        win.info, win.query, win.search, win.entry, win.list, win.tabs = info, query, search, entry, lst, tabs
+        win.row_menu, win.confirm, win.answer = row_menu, None, answer          # for tests
 
         def rows():
             out = []
             for r in lst.rows:
                 if r.get("kind", "chat") == "chat":
                     name = r["gamertag"] if not str(r["gamertag"]).isdigit() else f"Unknown player ({r['gamertag']})"
-                    out.append((name + ("  · muted" if r.get("muted") else ""), chat_ui.when_label(r.get("at"))))
+                    out.append((name + ("  · muted" if r.get("muted") else ""),
+                                r["aside"] if "aside" in r else chat_ui.when_label(r.get("at"))))
+                else:
+                    out.append((r["text"],))
             return out
         win.rows = rows
         win.open = lambda gt: [lst.select(r["xuid"]) for r in list(lst.rows)
-                               if r.get("kind", "chat") == "chat" and r["gamertag"] == gt]
+                               if r.get("kind", "chat") == "chat" and r["gamertag"] == gt][:1]
         win.panel = None
-        self._place_dialog(win, 1060, 700)
-        if key_now in self.inbox_cache:                         # the last inbox at once; then the fresh one
-            show(self.inbox_cache[key_now], None, cached=True)
-        load()
+        self._place_dialog(win, 1080, 720)
+        columns(self.root.winfo_width())
+        for part, show in (("chats", show_chats), ("friends", show_friends), ("requests", show_requests)):
+            if (key_now, part) in self.inbox_cache:             # the last copy at once; then the fresh one
+                show(self.inbox_cache[(key_now, part)], None, cached=True)
+        render()
+        load_all()
         return win
 
-    def friends_dialog(self):
-        """Your Xbox friends (online first, what they are doing) and a search for anyone on Xbox. Typing filters the
-        friends; Enter searches Xbox. Loading the friends also refreshes the Friend highlight in the main list."""
+    def _request_card(self, parent, f, side, accept, ignore, cancel, message):
+        """The right side for a friend request: who it is, what they are doing, and Accept / Ignore (or Cancel for
+        one you sent). Nothing happens until a button is clicked."""
         P = self.pal
-        win = tk.Toplevel(self.root)
-        win.title("Friends")
-        win.configure(bg=P["bg"])
-        head = tk.Frame(win, bg=P["head"])
-        head.pack(fill="x")
-        top = tk.Frame(head, bg=P["head"])
-        top.pack(fill="x", padx=14, pady=(12, 6))
-        tk.Label(top, text="Friends", bg=P["head"], fg=P["fg"], font=("Segoe UI", 14, "bold")).pack(side="left")
-        info = tk.StringVar(value="Loading from Xbox...")
-        tk.Label(top, textvariable=info, bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
-                                                                                                 padx=(10, 0))
-        ttk.Button(top, text="↻  Refresh", style="Tool.TButton", command=lambda: load()).pack(side="right")
-        query = tk.StringVar()
-        entry = ttk.Entry(head, textvariable=query, font=("Segoe UI", 10))
-        entry.pack(fill="x", padx=14, pady=(0, 12))
-        hint = "Search your friends, or press Enter to find anyone on Xbox"
+        card = tk.Frame(parent, bg=P["bg"])
+        box = tk.Frame(card, bg=P["bg"])
+        box.place(relx=0.5, rely=0.42, anchor="center")
+        name = f["gamertag"] if not str(f["gamertag"]).isdigit() else "Unknown player"
+        av = tk.Canvas(box, width=84, height=84, bg=P["bg"], highlightthickness=0)
+        av.pack()
 
-        box = ttk.Frame(win)
-        box.pack(fill="both", expand=True, padx=10, pady=(8, 0))
-        tv = ttk.Treeview(box, columns=("status", "relation"), show="tree", height=10, selectmode="browse")
-        tv.column("#0", width=230, stretch=False)
-        tv.column("status", width=300, anchor="w")
-        tv.column("relation", width=110, anchor="e", stretch=False)
-        tv.tag_configure("section", foreground=P["muted"], font=("Segoe UI", 8, "bold"))
-        tv.tag_configure("online", foreground=P["fg"])
-        tv.tag_configure("offline", foreground=P["muted"])
-        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        tv.pack(side="left", fill="both", expand=True)
+        def draw_av():
+            if av.winfo_exists():
+                av.delete("all")
+                chat_ui.draw_avatar(av, 42, 42, 36, name, f["xuid"], P, self.pictures.get(f.get("pic"), draw_av, size=64))
+                if f["state"].casefold() == "online":
+                    av.create_oval(60, 60, 76, 76, fill="#4cc764", outline=P["bg"], width=3)
+        draw_av()
+        tk.Label(box, text=name, bg=P["bg"], fg=P["fg"], font=("Segoe UI", 17, "bold")).pack(pady=(10, 0))
+        what = ("wants to be your friend on Xbox" if side == "received" else "hasn't answered your friend request yet")
+        when = chat_ui.ago_label(f["at"]) if f.get("at") else ""
+        tk.Label(box, text=what + (f" · {when}" if when else ""), bg=P["bg"], fg=P["muted"],
+                 font=("Segoe UI", 10)).pack(pady=(2, 0))
+        doing = (f["text"] or "Online") if f["state"].casefold() == "online" else (
+            "last seen " + chat_ui.ago_label(f["last_seen"]) if f.get("last_seen") else f["text"])
+        if doing:
+            tk.Label(box, text=("●  " if f["state"].casefold() == "online" else "") + doing, bg=P["bg"],
+                     fg="#4cc764" if f["state"].casefold() == "online" else P["muted"],
+                     font=("Segoe UI", 9)).pack(pady=(6, 0))
+        row = tk.Frame(box, bg=P["bg"])
+        row.pack(pady=(18, 0))
+        big = dict(font=("Segoe UI", 10, "bold"), padx=22, pady=9)
+        if side == "received":
+            card.accept_btn = chat_ui.RoundButton(row, "Accept", accept, P, P["bg"], kind="accent", **big)
+            card.accept_btn.pack(side="left", padx=5)
+            card.ignore_btn = chat_ui.RoundButton(row, "Ignore", ignore, P, P["bg"], **big)
+            card.ignore_btn.pack(side="left", padx=5)
+        else:
+            card.cancel_btn = chat_ui.RoundButton(row, "Cancel request", cancel, P, P["bg"], **big)
+            card.cancel_btn.pack(side="left", padx=5)
+        more = tk.Frame(box, bg=P["bg"])
+        more.pack(pady=(12, 0))
+        for text, fn in (("Message", message), ("Xbox profile", lambda: self.open_xbox_profile(f["gamertag"], f["xuid"])),
+                         ("SOTREP", lambda: webbrowser.open(sotrep.profile_url(f["gamertag"])))):
+            chat_ui.RoundButton(more, text, fn, P, P["bg"]).pack(side="left", padx=3)
+        card.note = tk.StringVar()
+        tk.Label(box, textvariable=card.note, bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9), wraplength=420).pack(
+            pady=(12, 0))
+        return card
 
-        friends, people, state = [], {}, {"results": None, "term": "", "placeholder": False}
+    # ---- tabs and pages (see _build)
+    MAIN_TABS = (("players", "Players"), ("social", "Friends & messages"), ("streams", "Live streams"),
+                 ("live", "Live now"))
 
-        def typed():                                           # what was typed (not the grey hint)
-            return "" if state["placeholder"] else query.get().strip()
+    def _tab_clicked(self, key):
+        if key == "players" or key in self.pages:
+            return self._show_page(key)
+        if key == "social":
+            return self._open_social()
+        if key == "streams":                     # the last list at once (no new request); Refresh asks again
+            return self._on_sot_streams(self.last_streams, None) if self.last_streams is not None \
+                else self.sot_streams()
+        if key == "live":
+            return self._show_live_results(*self.last_live) if self.last_live is not None else self.check_live_all()
 
-        def ago(ts):
-            s = max(0, int(time.time() - ts))
-            return ("just now" if s < 120 else f"{s // 60} min ago" if s < 3600 else f"{s // 3600} h ago"
-                    if s < 86400 else f"{s // 86400} days ago" if s < 86400 * 60 else time.strftime("%d %b %Y",
-                                                                                                    time.localtime(ts)))
+    # ---- questions inside the window (no message boxes)
+    def _question(self, title, text, buttons, entry=None):
+        """Ask in the open tab and wait for the answer (the window keeps working meanwhile). Closing the tab or
+        Escape gives the first button's value."""
+        parent = self.pages.get(self.page_now) if self.page_now in self.pages else self.players_tab
+        if not parent.winfo_ismapped():
+            parent = self.pages_host
+        got = {}
+        var = tk.StringVar(master=self.root)
+        card = chat_ui.question_card(parent, self.pal, title, text, buttons,
+                                     lambda v: (got.setdefault("v", v), var.set("1")), entry=entry)
+        card.bind("<Destroy>", lambda e: var.set("1") if e.widget is card else None, add="+")
+        self.question = card
+        self.root.wait_variable(var)
+        self.question = None
+        v = got.get("v", (buttons[0][1], "") if entry is not None else buttons[0][1])
+        return v
 
-        def add_row(f):
-            online = f["state"].casefold() == "online"
-            status = (f"●  {f['text'] or 'Online'}" if online else
-                      f"last seen {ago(f['last_seen'])}" if f.get("last_seen") else
-                      (f["text"] or ("" if f["state"] == "Unknown" else f["state"])))
-            iid = tv.insert("", "end", text=("★  " if f["favorite"] else "    ") + f["gamertag"],
-                            values=(status, f["relation"] if f["relation"] != "Friend" else ""),
-                            tags=("online" if online else "offline",))
-            people[iid] = f
+    def ask_yes(self, title, text, yes="Yes", no="Cancel", danger=False) -> bool:
+        return self._question(title, text, [(no, False, "soft"), (yes, True, "danger" if danger else "accent")]) is True
 
-        def section(title):
-            tv.insert("", "end", text=title, tags=("section",))
+    def _loading_page(self, key, text):
+        p = self._page(key, dict(self.MAIN_TABS)[key], closable=False, fresh=True)
+        tk.Label(p, text=text, bg=self.pal["bg"], fg=self.pal["muted"], font=("Segoe UI", 11)).pack(expand=True)
 
-        def render():
-            tv.delete(*tv.get_children())
-            people.clear()
-            q = " ".join(typed().casefold().split())
-            shown = [f for f in friends if not q or q in f["gamertag"].casefold()]
-            on = [f for f in shown if f["state"].casefold() == "online"]
-            off = [f for f in shown if f["state"].casefold() != "online"]
-            if on:
-                section(f"ONLINE — {len(on)}")
-                for f in on:
-                    add_row(f)
-            if off:
-                section(f"OFFLINE — {len(off)}")
-                for f in off:
-                    add_row(f)
-            if state["results"] is not None:
-                section(f"ON XBOX — \"{state['term']}\"")
-                mine = {f["xuid"] for f in friends}
-                extra = [f for f in state["results"] if f["xuid"] not in mine]
-                for f in extra:
-                    add_row(f)
-                if not extra:
-                    tv.insert("", "end", text="    nobody else found", tags=("offline",))
-            elif q and not shown:
-                tv.insert("", "end", text="    no friend matches: press Enter to search Xbox", tags=("offline",))
-            update_buttons()
+    SLIM = 900                     # narrower than this: the slim layout
+    ONE_COLUMN = 760               # narrower than this: Friends & messages shows the list or the chat, not both
+    SHORT_TABS = {"players": "Players", "social": "Friends", "streams": "Streams", "live": "Live"}
 
-        def chosen():
-            sel = tv.selection()
-            return people.get(sel[0]) if len(sel) == 1 else None
+    def _resized(self):
+        width = self.root.winfo_width()
+        if width < 100:                                    # not laid out yet
+            return
+        slim = width < self.SLIM
+        if slim != self.slim:
+            self.slim = slim
+            for key, label in self.MAIN_TABS:
+                if key != "social":
+                    self.tabstrip.set_label(key, self.SHORT_TABS[key] if slim else label)
+            self.msg_btn.base = self.SHORT_TABS["social"] if slim else self.SOCIAL
+            self._update_msg_button()
+            for w in self.status_extras:
+                if slim:
+                    w.pack_forget()
+                else:
+                    w.pack(side="right", padx=(0, 0 if w is self.count_lbl else 10), before=self.status_lbl)
+        for hook in list(self.slim_hooks):
+            try:
+                hook(width)
+            except tk.TclError:
+                self.slim_hooks.remove(hook)
 
-        def with_one(fn):
-            f = chosen()
-            if f is None:
-                return info.set("Select a player first.")
-            fn(f)
+    def _tab_close(self, key):
+        p = self.pages.get(key)
+        if p is not None and p.winfo_exists():
+            p.close()
 
-        def following(f):
-            return f["relation"] in self.FOLLOWING
+    def _show_page(self, key):
+        new = self.players_tab if key == "players" else self.pages.get(key)
+        if new is None or not new.winfo_exists():
+            return
+        if self.page_now != key:
+            cur = self.players_tab if self.page_now == "players" else self.pages.get(self.page_now)
+            if cur is not None and cur.winfo_exists():
+                cur.pack_forget()
+            new.pack(fill="both", expand=True)
+            self.page_now = key
+        self.page_trail = [k for k in getattr(self, "page_trail", []) if k != key][-20:] + [key]
+        self.tabstrip.select(key)
 
-        def toggle_friend(f):
-            if following(f):
-                self.remove_friend_selected(f["gamertag"], f["xuid"], after=load)
-            else:
-                self.add_friend_selected(f["gamertag"], f["xuid"], after=load)
+    def _page(self, key, title, closable=True, fresh=False):
+        """The page for key inside this window (made and shown as a tab, or the existing one brought up; fresh=True
+        empties it first, for pages that are rebuilt with new data)."""
+        p = self.pages.get(key)
+        if p is None or not p.winfo_exists():
+            p = chat_ui.Page(self.pages_host, key, self.pal["bg"], self._page_title, self._show_page, self._page_gone)
+            self.pages[key] = p
+            self.tabstrip.add(key, title, closable)
+        elif fresh:
+            for w in p.winfo_children():
+                w.destroy()
+        p.title(title)
+        self._show_page(key)
+        return p
 
-        bar = ttk.Frame(win, style="Bar.TFrame", padding=(10, 8))
-        bar.pack(fill="x", pady=(8, 0))
-        actions = (("Messages", lambda f: self.message_dialog(f["gamertag"], f["xuid"])),
-                   ("Invite / join in Game Bar", lambda f: self.invite_or_join(f["gamertag"])),
-                   ("Xbox profile", lambda f: self.open_xbox_profile(f["gamertag"], f["xuid"])),
-                   ("SOTREP", lambda f: webbrowser.open(sotrep.profile_url(f["gamertag"]))))
-        buttons = []
-        for i, (text, fn) in enumerate(actions):
-            b = ttk.Button(bar, text=text, style="Accent.TButton" if i == 0 else "Tool.TButton",
-                           command=lambda fn=fn: with_one(fn))
-            b.pack(side="left", padx=(0, 4))
-            buttons.append(b)
-        friend_btn = ttk.Button(bar, text="Add friend", style="Tool.TButton", command=lambda: with_one(toggle_friend))
-        friend_btn.pack(side="right")
+    def _page_title(self, key, title):
+        if key not in dict(self.MAIN_TABS):          # the main tabs keep their own names
+            self.tabstrip.set_label(key, title if len(title) <= 32 else title[:31] + "…")
 
-        def update_buttons(*_):
-            f = chosen()
-            for b in buttons + [friend_btn]:
-                b.state(["!disabled"] if f else ["disabled"])
-            friend_btn.configure(text="Remove friend" if f and following(f) else "Add friend")
-
-        def row_menu(e):
-            row = tv.identify_row(e.y)
-            if row not in people:
-                return
-            tv.selection_set(row)
-            f = people[row]
-            m = self._menu(win)
-            for text, fn in actions:
-                m.add_command(label=text, command=lambda fn=fn: fn(f))
-            m.add_separator()
-            m.add_command(label="Remove friend..." if following(f) else "Add friend", command=lambda: toggle_friend(f))
-            win.row_menu = m
-            m.tk_popup(e.x_root, e.y_root)
-
-        tv.bind("<<TreeviewSelect>>", update_buttons)
-        tv.bind("<Double-1>", lambda e: with_one(actions[0][1]))
-        tv.bind("<Return>", lambda e: with_one(actions[0][1]))
-        tv.bind("<Button-3>", row_menu)
-
-        def on_type(*_):
-            if state["placeholder"]:
-                return
-            if state["results"] is not None and typed() != state["term"]:
-                state["results"] = None                       # a new search term: back to the friends
-            render()
-        query.trace_add("write", on_type)
-
-        def search(_=None):
-            term = typed()
-            if not term:
-                return
-            info.set(f"Searching Xbox for \"{term}\"...")
-
-            def found(res, err):
-                if not win.winfo_exists():
-                    return
-                if err:
-                    return info.set(f"Xbox search failed: {err}")
-                state["results"], state["term"] = res, term
-                summary()
-                render()
-            self._xbox_bg(lambda k: social.search_players(k, term), found)
-        entry.bind("<Return>", search)
-        entry.bind("<Escape>", lambda e: query.set(""))
-
-        def summary():
-            n_on = sum(1 for f in friends if f["state"].casefold() == "online")
-            info.set(f"{n_on} online · {len(friends)} in your list · {self.xkey.active() or ''}")
-
-        def show(res, err):
-            if not win.winfo_exists():
-                return
-            if err:
-                return info.set(f"Could not load your friends: {err}")
-            friends[:] = res
-            summary()
-            render()
-            owner = self.xkey.active()
-            if owner:
-                self.db.replace_friends(owner, {f["xuid"]: f["relation"] for f in res})
-                self.reload()
-
-        def load():
-            info.set("Loading from Xbox...")
-            self._xbox_bg(social.friend_list, show)
-
-        def placeholder(on):                                   # grey hint text while the box is empty
-            if on and not query.get():
-                state["placeholder"] = True
-                entry.configure(foreground=P["muted"])
-                query.set(hint)
-            elif not on and state["placeholder"]:
-                query.set("")
-                state["placeholder"] = False
-                entry.configure(foreground=P["fg"])
-        entry.bind("<FocusIn>", lambda e: placeholder(False))
-        entry.bind("<FocusOut>", lambda e: placeholder(True))
-        placeholder(True)
-
-        win.friends_tv, win.show, win.info, win.query, win.search = tv, show, info, query, search   # for tests
-        win.rows = lambda: [(tv.item(i, "text").strip(" ★"),) + tuple(tv.item(i, "values")) for i in people]
-        win.select = lambda gt: [tv.selection_set(i) for i, f in people.items() if f["gamertag"] == gt]
-        win.friend_btn, win.entry = friend_btn, entry
-        self._place_dialog(win, 700, 560)
-        load()
-        return win
+    def _page_gone(self, key, page):
+        if self.pages.get(key) is page:
+            del self.pages[key]
+        if key not in dict(self.MAIN_TABS):
+            self.tabstrip.remove(key)
+        self.page_trail = [k for k in getattr(self, "page_trail", []) if k != key]
+        if self.page_now == key:
+            self.page_now = None
+            if not self.closing:                       # back to the tab you came from
+                back = next((k for k in reversed(self.page_trail) if k == "players" or k in self.pages), "players")
+                self._show_page(back)
 
     def _place_dialog(self, win, width=None, height=None):
-        """Centre a dialog over the main window and bring it to the front. Without this Windows may put a
-        new Toplevel at the screen's top-left corner, out of sight. Dialogs never grab input, so a dialog
-        that is somehow hidden can not freeze the main window."""
+        """Show a page's tab (pages live in this window); a real window is centred over the main one."""
+        if isinstance(win, chat_ui.Page):
+            return win.lift()
         win.update_idletasks()
         w, h = width or win.winfo_reqwidth(), height or win.winfo_reqheight()
         r = self.root
@@ -1559,7 +2035,7 @@ class App(SharedListMixin):
         win.focus_force()
 
     def _ask_tag(self, title, prompt, values, editable):
-        win = tk.Toplevel(self.root)
+        win = self._page("ask", title)
         win.title(title)
         win.configure(bg=self.pal["bg"])
         win.transient(self.root)
@@ -1587,7 +2063,7 @@ class App(SharedListMixin):
     def tag_selected(self):
         ids = self._selected_ids()
         if not ids:
-            return messagebox.showinfo("Tag", "Select one or more players first.")
+            return self.set_status("Tag: select one or more players first.", error=True)
         tag = self._ask_tag("Tag players", f"Tag {len(ids)} selected player(s) with (pick one or type a new tag):",
                             self.db.all_tags(), True)
         if tag:
@@ -1598,7 +2074,7 @@ class App(SharedListMixin):
         ids = self._selected_ids()
         have = self.db.tags_for(ids)
         if not ids or not have:
-            return messagebox.showinfo("Remove tag", "Select players that have a tag first.")
+            return self.set_status("Untag: select players that have a tag first.", error=True)
         tag = self._ask_tag("Remove tag", "Remove which tag from the selected player(s)?", have, False)
         if tag:
             self.db.remove_tag(ids, tag)
@@ -1607,12 +2083,12 @@ class App(SharedListMixin):
     def encounters_dialog(self):
         ids = self._selected_ids()
         if not ids:
-            return messagebox.showinfo("Encounters", "Select one or more players first.")
+            return self.set_status("Encounters: select one or more players first.", error=True)
         owner = self.xkey.active()
         details = self.db.account_details(ids, owner)
         rows = self.db.encounters_for_many(ids)
-        win = tk.Toplevel(self.root)
-        win.title(f"Players: {len(ids)} selected, {len(rows)} recorded encounter(s)")
+        win = self._page("encounters", "Encounters", fresh=True)
+        win.title(f"Encounters ({len(ids)})")
         win.configure(bg=self.pal["bg"])
         ttk.Label(win, style="Hint.TLabel", wraplength=820, justify="left", text=(
             "Xbox does not provide encounter times. 'First/last seen' is when this app saw the player in Xbox's "
@@ -1659,7 +2135,7 @@ class App(SharedListMixin):
 
     # ---- optional Twitch section ----
     def twitch_setup_dialog(self):
-        win = tk.Toplevel(self.root)
+        win = self._page("twitch_setup", "Twitch setup", fresh=True)
         win.title("Twitch setup (optional)")
         win.configure(bg=self.pal["bg"])
         win.transient(self.root)
@@ -1740,14 +2216,15 @@ class App(SharedListMixin):
     def link_twitch_selected(self):
         ids = self._selected_ids()
         if len(ids) != 1:
-            return messagebox.showinfo("Twitch", "Select exactly one player to link a Twitch channel.")
+            return self.set_status("Select exactly one player to link a Twitch channel.", error=True)
         if not self.tcreds.configured():
-            messagebox.showinfo("Twitch", "Twitch is not set up yet. Opening 'Twitch setup...'.")
+            self.set_status("Twitch is not set up yet: set it up first, then link the channel.", error=True)
             return self.twitch_setup_dialog()
         aid = ids[0]
         gamertag = self.tree.set(str(aid), "gamertag")
         if self.db.twitch_never([aid]):
-            if not messagebox.askyesno("Twitch", f"{gamertag} is marked 'never link'. Remove that mark?"):
+            if not self.ask_yes("Never link", f"{gamertag} is marked 'never link'. Remove that mark?",
+                                yes="Remove mark"):
                 return
             self.db.clear_twitch_never([aid])
             self.reload()
@@ -1759,7 +2236,8 @@ class App(SharedListMixin):
         if name is None:
             return
         if name == "":
-            if cur and messagebox.askyesno("Twitch", f"Remove the Twitch link of {gamertag}?"):
+            if cur and self.ask_yes("Twitch", f"Remove the Twitch link of {gamertag}?", yes="Remove link",
+                                    danger=True):
                 self.db.unlink_twitch([aid])
                 self.reload()
             return
@@ -1798,10 +2276,19 @@ class App(SharedListMixin):
             return
         self._set_busy("sotstreams", True)
         self.set_status("Asking Twitch who is live in Sea of Thieves...")
+        if "streams" not in self.pages:
+            self._loading_page("streams", "Asking Twitch who is live in Sea of Thieves...")
 
         def work():
             try:
-                self.q.put(("sot_streams", (self.tclient.game_streams(), None)))
+                streams = self.tclient.game_streams()
+                try:
+                    pics = self.tclient.profile_pictures([s["id"] for s in streams])
+                except ProviderError:                   # no pictures is fine: letters instead
+                    pics = {}
+                for s in streams:
+                    s["pic"] = pics.get(s["id"], "")
+                self.q.put(("sot_streams", (streams, None)))
             except ProviderError as e:
                 self.q.put(("sot_streams", ([], str(e))))
             except Exception as e:
@@ -1814,73 +2301,158 @@ class App(SharedListMixin):
         if not started:
             return ""
         m = max(0, int(now - started)) // 60
-        return f"{m // 60}h {m % 60:02d}m"
+        return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
+
+    LIVE_RED = "#e5484d"
+    TWITCH_PURPLE = "#9146ff"
+    STREAM_ROWS = {"cards": 78, "compact": 38, "rows": 28}     # Live streams / Live now: height per view
+    STREAM_GAPS = {"cards": 4, "compact": 4, "rows": 0}
+    LIVE_ROWS = {"cards": 76, "compact": 42, "rows": 28}
+    VIEWER_RANGES = (("Any viewers", "", ""), ("Under 10", "", "9"), ("10 – 100", "10", "100"),
+                     ("100 – 1,000", "100", "1000"), ("1,000+", "1000", ""))
 
     def _on_sot_streams(self, streams, err):
         self._set_busy("sotstreams", False)
         if err:
             return self.set_status(f"Live SoT streams failed: {err}", error=True)
         self.set_status(f"{len(streams)} streams live in Sea of Thieves right now.")
-        old = getattr(self, "sot_win", None)
-        if old is not None and old.winfo_exists():
-            old.destroy()
-        win = self.sot_win = tk.Toplevel(self.root)
-        win.title(f"Live in Sea of Thieves on Twitch ({len(streams)})")
-        win.configure(bg=self.pal["bg"])
+        self.last_streams = streams                              # the tab shows these again without asking
+        geo = None
+        P = self.pal
+        win = self.sot_win = self._page("streams", "Live streams", closable=False, fresh=True)
+        win.title(f"Live in Sea of Thieves ({len(streams)})")
+        win.configure(bg=P["bg"])
         accounts = self.db.list_accounts(owner=self.xkey.active())
-        recent = sorted(accounts, key=lambda a: (a["pos"] is None, a["pos"] if a["pos"] is not None else 0))
-        by_tag = {}
-        for a in recent:
-            by_tag.setdefault(a["gamertag"], a)
         linked = {l["twitch_id"]: l["account_id"] for l in self.db.twitch_links()}
         master = self.db.shared_by_twitch()                    # also players this PC has never met
         tag_of = {a["id"]: a["gamertag"] for a in accounts}
-        same = {}
-        for a in recent:
-            if a["twitch_never"] is None:
-                for c in login_candidates(a["gamertag"]):
-                    same.setdefault(c, a["gamertag"])
 
         def match(s):
             if s["id"] in linked:
                 return "linked: " + tag_of.get(linked[s["id"]], "?")
             if s["id"] in master:
                 return "linked: " + master[s["id"]] + SHARED_MARK
-            return "same name: " + same[s["login"].lower()] if s["login"].lower() in same else ""
+            return ""
 
-        ttk.Label(win, style="Hint.TLabel", wraplength=860, justify="left", text=(
-            "Everyone streaming Sea of Thieves on Twitch now. Just met a streamer? Find them here (filter by name or "
-            "title), pick the player below or type any Xbox gamertag (e.g. from 'Find on SOTREP') and press 'Link'. "
-            "'same name' is only a guess. Click a column to sort.")).pack(fill="x", padx=10,
-                                                                                                    pady=(10, 4))
+        # ---- header: title, count, refresh
+        head = tk.Frame(win, bg=P["head"])
+        head.pack(fill="x")
+        top = tk.Frame(head, bg=P["head"])
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(top, text="Live in Sea of Thieves", bg=P["head"], fg=P["fg"], font=("Segoe UI", 15, "bold")).pack(
+            side="left")
+        shown = tk.StringVar()
+        tk.Label(top, textvariable=shown, bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
+                                                                                                padx=(12, 0))
+        chat_ui.RoundButton(top, "↻  Refresh", self.sot_streams, P, P["head"], kind="accent", pady=7).pack(
+            side="right")
+        filters_btn = chat_ui.RoundButton(top, "", lambda: toggle_filters(), P, P["head"], pady=7)
+        filters_btn.pack(side="right", padx=(0, 8))
+        stream_view = self.db.get_setting("stream_view", "cards")
+        if stream_view not in self.STREAM_ROWS:
+            stream_view = "cards"
+        view_now = {"v": stream_view}
+        sview_var = tk.StringVar(value=self.VIEW_NAMES[stream_view])
+
+        def pick_view():
+            v = {b: a for a, b in self.VIEW_NAMES.items()}[sview_var.get()]
+            self.db.set_setting("stream_view", v)
+            view_now["v"], tv.row, tv.gap = v, self.STREAM_ROWS[v], self.STREAM_GAPS[v]
+            tv.redraw()
+        chat_ui.PillSelect(top, P, P["head"], sview_var, values=list(self.VIEW_NAMES.values()), on_change=pick_view,
+                           prefix="View: ", pady=7).pack(side="right", padx=(0, 8))
+        hint_lbl = tk.Label(head, text="Everyone streaming Sea of Thieves on Twitch now. ✔ marks a stream of one of "
+                            "your players. Click a stream for a live preview; double-click to watch it on Twitch.",
+                            bg=P["head"], fg=P["muted"], font=("Segoe UI", 9), anchor="w", justify="left",
+                            wraplength=900)
+        hint_lbl.pack(fill="x", padx=16, pady=(0, 8))
+
+        # ---- filters: search, language, viewers, only my players
+        filt = chat_ui.Flow(head, P["head"])
+        filt.pack(fill="x", padx=12, pady=(0, 6))
+        fvar = tk.StringVar()
+
+        def make_entry(parent_, bg):
+            return tk.Entry(parent_, textvariable=fvar, bg=bg, fg=P["fg"], insertbackground=P["fg"], relief="flat",
+                            bd=0, font=("Segoe UI", 10), highlightthickness=0)
+        sbox = chat_ui.RoundBox(filt, P, P["head"], make_entry, height=36, radius=18)
+        sbox.configure(width=260)
+        filt.add(sbox)
+        hint = tk.Label(sbox, text="Search channel, title or tag", bg=sbox.inner.cget("bg"), fg=P["muted"],
+                        font=("Segoe UI", 10), cursor="xterm")
+        hint.bind("<Button-1>", lambda e: sbox.inner.focus_set())
+
+        def show_hint(*_):
+            if fvar.get() or win.focus_get() is sbox.inner:
+                hint.place_forget()
+            else:
+                hint.place(in_=sbox.inner, x=0, rely=0.5, anchor="w")
+        fvar.trace_add("write", show_hint)
+        sbox.inner.bind("<FocusIn>", show_hint, add="+")
+        sbox.inner.bind("<FocusOut>", lambda e: win.after(1, show_hint), add="+")
+        win.after(50, show_hint)
         langs = {}
         for s in streams:
             langs[s["language"] or "?"] = langs.get(s["language"] or "?", 0) + 1
         lang_label = {"All languages": None, **{f"{l} ({n})": l for l, n in
                                                 sorted(langs.items(), key=lambda kv: (-kv[1], kv[0]))}}
-        top = ttk.Frame(win)
-        top.pack(fill="x", padx=10)
-        ttk.Label(top, text="Search:").pack(side="left")
-        fvar = tk.StringVar()
-        ttk.Entry(top, textvariable=fvar, width=24).pack(side="left", padx=(4, 10))
         lvar = tk.StringVar(value="All languages")
-        ttk.Combobox(top, textvariable=lvar, values=list(lang_label), state="readonly", width=16).pack(side="left")
-        ttk.Label(top, text="Viewers").pack(side="left", padx=(10, 4))
-        vmin, vmax = tk.StringVar(), tk.StringVar()
-        ttk.Entry(top, textvariable=vmin, width=6).pack(side="left")
-        ttk.Label(top, text="to").pack(side="left", padx=3)
-        ttk.Entry(top, textvariable=vmax, width=6).pack(side="left")
+        filt.add(chat_ui.PillSelect(filt, P, P["head"], lvar, values=list(lang_label), pady=8), space=2)
+        vmin, vmax, vrange = tk.StringVar(), tk.StringVar(), tk.StringVar(value="Any viewers")
+
+        def pick_range():
+            lo, hi = next(((a, b) for n, a, b in self.VIEWER_RANGES if n == vrange.get()), ("", ""))
+            vmin.set(lo)
+            vmax.set(hi)
+        filt.add(chat_ui.PillSelect(filt, P, P["head"], vrange, values=[r[0] for r in self.VIEWER_RANGES],
+                                    on_change=pick_range, pady=8))
         mine = tk.BooleanVar()
-        ttk.Checkbutton(top, text="Only my players", variable=mine).pack(side="left", padx=(10, 0))
-        shown = tk.StringVar()
-        ttk.Label(top, textvariable=shown, style="Hint.TLabel").pack(side="right")
-        box = ttk.Frame(win)
-        box.pack(fill="both", expand=True, padx=10, pady=4)
-        cols = (("match", "Your player", 180), ("channel", "Channel", 160), ("viewers", "Viewers", 60),
-                ("uptime", "Live for", 65), ("lang", "Lang", 45), ("title", "Title", 420), ("tags", "Tags", 260))
-        wide = ("title", "tags")                                  # only these grow with the window
-        tv = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=14)
+        mine_btn = chat_ui.RoundButton(filt, "Only my players", lambda: mine.set(not mine.get()), P, P["head"], pady=8)
+        filt.add(mine_btn)
+        mine.trace_add("write", lambda *a: mine_btn.set_kind("accent" if mine.get() else "soft"))
+
+        # ---- sort chips
+        chips_row = chat_ui.Flow(head, P["head"], gap=4)
+        chips_row.pack(fill="x", padx=12, pady=(0, 12))
+        chips_row.add(tk.Label(chips_row, text="Sort", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9), padx=4))
         sort = {"col": None, "desc": False}
+        chips = {}
+        for c, label in (("viewers", "Viewers"), ("uptime", "Live for"), ("channel", "Channel"),
+                         ("match", "Your player"), ("lang", "Language")):
+            b = chat_ui.RoundButton(chips_row, label, lambda c=c: sort_by(c), P, P["head"], padx=12, pady=5)
+            b.label = label
+            chips_row.add(b)
+            chips[c] = b
+        reset_btn = chat_ui.RoundButton(chips_row, "Reset view", lambda: reset(), P, P["head"], padx=12, pady=5)
+        chips_row.add(reset_btn, right=True)
+
+        def show_filters(on):
+            """The hint, filter and sort rows; hidden, the list gets the room (the filters still apply)."""
+            for w, pady in ((hint_lbl, (0, 8)), (filt, (0, 6)), (chips_row, (0, 12))):
+                if on:
+                    w.pack(fill="x", padx=16 if w is hint_lbl else 12, pady=pady)
+                else:
+                    w.pack_forget()
+            if not on:                                        # keep the header from collapsing into the title
+                top.pack_configure(pady=(14, 12))
+            else:
+                top.pack_configure(pady=(14, 4))
+            active = bool(fvar.get().strip() or lang_label.get(lvar.get()) or vmin.get() or vmax.get() or mine.get())
+            filters_btn.set_text(("Hide filters  ▴" if on else "Filters  ▾") + ("" if on or not active else "  •"))
+            filters_btn.set_kind("soft")
+
+        def toggle_filters():
+            on = self.db.get_setting("stream_filters", "1") != "1"
+            self.db.set_setting("stream_filters", "1" if on else "0")
+            show_filters(on)
+        win.toggle_filters = toggle_filters
+        win.set_view = lambda label: (sview_var.set(label), pick_view())             # for tests
+
+        def show_chips():
+            for c, b in chips.items():
+                on = c == sort["col"]
+                b.set_kind("accent" if on else "soft")
+                b.set_text(b.label + ((" ▼" if sort["desc"] else " ▲") if on else ""))
         keys = {"match": lambda s: (not match(s), match(s).casefold()), "channel": lambda s: s["name"].casefold(),
                 "viewers": lambda s: s["viewers"], "uptime": lambda s: -(s["started"] or 0),
                 "lang": lambda s: s["language"], "title": lambda s: s["title"].casefold(),
@@ -1891,16 +2463,142 @@ class App(SharedListMixin):
             sort["col"] = c
             fill()
             remember()
-        for c, t, w in cols:
-            tv.heading(c, text=t, command=lambda c=c: sort_by(c))
-            tv.column(c, width=w, minwidth=30, anchor="e" if c == "viewers" else "w", stretch=c in wide)
-        tv.tag_configure("match", background=self.pal["friend"])
-        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        tv.pack(side="left", fill="both", expand=True)
-        rows = {}
+
+        # ---- link bar at the bottom (packed before the list so it never gets squeezed out)
+        bar = tk.Frame(win, bg=P["head"])
+        bar.pack(side="bottom", fill="x")
+        inner = tk.Frame(bar, bg=P["head"])
+        inner.pack(fill="x", padx=12, pady=10)
+        open_btn = chat_ui.RoundButton(inner, "Open stream", lambda: open_stream(), P, P["head"], kind="accent",
+                                       padx=18, pady=7)
+        open_btn.pack(side="left", padx=3)
+        rep_btn = chat_ui.RoundButton(inner, "Find on SOTREP", lambda: find_on_sotrep(), P, P["head"], pady=7)
+        rep_btn.pack(side="left", padx=3)
+
+        # ---- the streams as cards
         now = time.time()
+        small, bold, tiny = ("Segoe UI", 8), ("Segoe UI", 11, "bold"), ("Segoe UI", 8, "bold")
+        bold_font = tkfont.Font(font=bold)
+
+        def draw(c, iid, values, tags, x1, y1, x2, y2, sel, hov):
+            s = rows[iid]
+            m = values[0]
+            ok = m.startswith("linked")
+            if view_now["v"] == "rows" and tv.expanded != iid:
+                tv.line(iid, x1, y1, x2, y2, sel, hov, stripe=P["accent"] if ok else None)
+                return draw_row(c, iid, s, values, m, ok, x1, y1, x2, y2, pic=False)
+            tv.card(x1, y1, x2, y2, sel, hov, stripe=P["accent"] if ok else None)
+            if tv.expanded == iid:
+                return draw_open(c, iid, s, values, m, ok, x1, y1, x2, y2)
+            if view_now["v"] == "compact":
+                return draw_row(c, iid, s, values, m, ok, x1, y1, x2, y2)
+            cx, cy = x1 + 40, (y1 + y2) / 2
+            img = self.pictures.get(s.get("pic"), tv.picture_arrived) if s.get("pic") else None
+            if img is not None:
+                c.create_image(cx, cy, image=img)
+            else:
+                c.create_oval(cx - 20, cy - 20, cx + 20, cy + 20, fill=self.TWITCH_PURPLE, outline="")
+                c.create_text(cx, cy, text=(s["name"][:1] or "?").upper(), fill="#ffffff",
+                              font=("Segoe UI", 13, "bold"))
+            right = x2 - 14
+            vx = chat_ui.pill(c, right, y1 + 22, f"●  {s['viewers']:,}", self.LIVE_RED, "#ffffff", tiny)
+            mx = vx
+            if m:
+                mx = chat_ui.pill(c, right, y2 - 20, "✔ " + m.split(": ", 1)[1],
+                                  chat_ui._mix(P["panel"], P["accent"], 0.45), P["fg"], small)
+            tx = cx + 32
+            name_w = min(bold_font.measure(s["name"]), max(60, vx - tx - 150))
+            c.create_text(tx, y1 + 20, anchor="w", text=chat_ui.fit(s["name"], bold, name_w), fill=P["fg"], font=bold)
+            meta = "  ·  ".join(x for x in (values[3] and "live " + values[3], (s["language"] or "").upper()) if x)
+            c.create_text(tx + name_w + 10, y1 + 21, anchor="w", text=chat_ui.fit(meta, small, vx - tx - name_w - 20),
+                          fill=P["muted"], font=small)
+            c.create_text(tx, y1 + 41, anchor="w", text=chat_ui.fit(s["title"], ("Segoe UI", 9), mx - tx - 12),
+                          fill=P["fg"], font=("Segoe UI", 9))
+            if values[6]:
+                c.create_text(tx, y1 + 59, anchor="w", text=chat_ui.fit("#  " + values[6].replace(", ", "  ·  "),
+                                                                        small, mx - tx - 12),
+                              fill=P["muted"], font=small)
+
+        def draw_open(c, iid, s, values, m, ok, x1, y1, x2, y2):
+            """An unfolded stream: Twitch's live snapshot, the whole title, the tags and buttons."""
+            wide = x2 - x1 >= 660
+            pw, ph = (320, 180) if wide else (192, 108)
+            px, py = x1 + 16, y1 + 16
+            img = self.previews.get(s.get("thumb"), tv.picture_arrived, size=(pw, ph))
+            if img is not None:
+                c.create_image(px, py, image=img, anchor="nw")
+            else:
+                chat_ui.round_rect(c, px, py, px + pw, py + ph, 10, fill=chat_ui._mix(P["bg"], "#000000", 0.3),
+                                   outline="")
+                c.create_text(px + pw / 2, py + ph / 2, text="Loading the preview..." if s.get("thumb") else
+                              "No preview", fill=P["muted"], font=("Segoe UI", 9))
+            c.create_oval(px + pw / 2 - 22, py + ph / 2 - 22, px + pw / 2 + 22, py + ph / 2 + 22,
+                          fill=chat_ui._mix("#000000", self.TWITCH_PURPLE, 0.6), outline="")
+            c.create_text(px + pw / 2 + 2, py + ph / 2, text="▶", fill="#ffffff", font=("Segoe UI", 16))
+            tv.spot(iid, (px, py, px + pw, py + ph), lambda: open_login(s["login"]))
+            right = x2 - 14
+            vx = chat_ui.pill(c, right, y1 + 26, f"●  {s['viewers']:,} watching", self.LIVE_RED, "#ffffff", tiny)
+            tx, ty = px + pw + 18, y1 + 16                    # the text next to the preview, also when slim
+            c.create_text(tx, ty + 10, anchor="w", text=chat_ui.fit(s["name"], bold, max(40, vx - tx - 12)),
+                          fill=P["fg"], font=bold)
+            meta = "  ·  ".join(x for x in ("live " + values[3] if values[3] else "",
+                                            (s["language"] or "").upper(),
+                                            ("✔ " + m.split(": ", 1)[1]) if ok else "") if x)
+            c.create_text(tx, ty + 32, anchor="w", text=meta, fill=P["muted"], font=small)
+            title = c.create_text(tx, ty + 46, anchor="nw", text=s["title"], fill=P["fg"], font=("Segoe UI", 10),
+                                  width=max(120, right - tx - 4))
+            bb = c.bbox(title) or (0, 0, 0, ty + 66)
+            if values[6]:
+                c.create_text(tx, bb[3] + 8, anchor="nw", text="#  " + values[6].replace(", ", "   #  "),
+                              fill=P["muted"], font=small, width=max(120, right - tx - 4))
+            bx, by = tx, y2 - 30
+            for label, kind, fn in (("▶  Watch on Twitch", "accent", lambda: open_login(s["login"])),
+                                    ("Find on SOTREP", "soft", lambda: webbrowser.open(
+                                        sotrep.twitch_search_url(s["login"])))):
+                fill_c, fg_c = (P["accent"], P["bg"]) if kind == "accent" else                     (chat_ui._mix(P["panel"], P["fg"], 0.12), P["fg"])
+                w = chat_ui.pill(c, bx, by, label, fill_c, fg_c, ("Segoe UI", 9, "bold"), anchor="w", padx=14, h=28)
+                end = bx + (tkfont.Font(font=("Segoe UI", 9, "bold")).measure(label) + 28)
+                tv.spot(iid, (w, by - 14, end, by + 14), fn)
+                bx = end + 8
+
+        def draw_row(c, iid, s, values, m, ok, x1, y1, x2, y2, pic=True):
+            """One stream on one line: (picture,) name, live for, language, title; viewers (and your player) right."""
+            cy = (y1 + y2) / 2
+            cx = x1 + 22
+            if pic:
+                img = self.pictures.get(s.get("pic"), tv.picture_arrived, size=24) if s.get("pic") else None
+                if img is not None:
+                    c.create_image(cx, cy, image=img)
+                else:
+                    c.create_oval(cx - 11, cy - 11, cx + 11, cy + 11, fill=self.TWITCH_PURPLE, outline="")
+                    c.create_text(cx, cy, text=(s["name"][:1] or "?").upper(), fill="#ffffff",
+                                  font=("Segoe UI", 9, "bold"))
+            else:
+                cx = x1 - 6
+            right = x2 - 12
+            right = chat_ui.pill(c, right, cy, f"●  {s['viewers']:,}", self.LIVE_RED, "#ffffff", tiny, h=18) - 8
+            if ok:
+                right = chat_ui.pill(c, right, cy, "✔ " + m.split(": ", 1)[1],
+                                     chat_ui._mix(P["panel"], P["accent"], 0.45), P["fg"], small, h=18) - 8
+            tx = cx + 20
+            name_font = ("Segoe UI", 10, "bold") if pic else ("Segoe UI", 9, "bold")
+            nw = min(tkfont.Font(font=name_font).measure(s["name"]), 170)
+            c.create_text(tx, cy, anchor="w", text=chat_ui.fit(s["name"], name_font, nw), fill=P["fg"], font=name_font)
+            meta = "  ·  ".join(x for x in (values[3], (s["language"] or "").upper()) if x)
+            mx = tx + nw + 10
+            c.create_text(mx, cy, anchor="w", text=meta, fill=P["muted"], font=small)
+            mx += tkfont.Font(font=small).measure(meta) + 14
+            c.create_text(mx, cy, anchor="w", text=chat_ui.fit(s["title"], ("Segoe UI", 9), right - mx - 6),
+                          fill=P["fg"], font=("Segoe UI", 9))
+
+        def open_login(login):
+            webbrowser.open(f"https://www.twitch.tv/{login}")
+
+        tv = chat_ui.CardList(win, P, draw, row=self.STREAM_ROWS[stream_view], big=232,
+                              gap=self.STREAM_GAPS[stream_view],
+                              empty="No stream matches these filters")
+        tv.pack(fill="both", expand=True, padx=8, pady=(6, 0))
+        rows = {}
 
         def num(var):
             try:
@@ -1927,11 +2625,19 @@ class App(SharedListMixin):
                 iid = tv.insert("", "end", tags=("match",) if m else (), values=(
                     m, s["name"], s["viewers"], self._uptime(s["started"], now), s["language"], s["title"], tags))
                 rows[iid] = s
-            shown.set(f"showing {len(rows)} of {len(streams)}")
+            shown.set(f"{len(rows)} of {len(streams)} streams")
+            show_chips()
 
-        keep = getattr(self, "sot_filters", {})                       # Refresh keeps the filters
+        keep = getattr(self, "sot_filters", None)                     # Refresh keeps the filters,
+        if keep is None:                                              # and so does the next start (not the search)
+            try:
+                keep = json.loads(self.db.get_setting("stream_filter_values", "{}") or "{}")
+            except ValueError:
+                keep = {}
+            keep = keep if isinstance(keep, dict) else {}
         fvar.set(keep.get("search", ""))
         lvar.set(next((k for k, v in lang_label.items() if v == keep.get("lang")), "All languages"))
+        vrange.set(keep.get("vrange", "Any viewers"))
         vmin.set(keep.get("vmin", ""))
         vmax.set(keep.get("vmax", ""))
         mine.set(keep.get("mine", False))
@@ -1939,134 +2645,62 @@ class App(SharedListMixin):
 
         def remember(*_):
             self.sot_filters = {"search": fvar.get(), "lang": lang_label.get(lvar.get()), "vmin": vmin.get(),
-                                "vmax": vmax.get(), "mine": mine.get(), "sort": dict(sort)}
+                                "vmax": vmax.get(), "vrange": vrange.get(), "mine": mine.get(), "sort": dict(sort)}
+            self.db.set_setting("stream_filter_values", json.dumps(
+                {k: v for k, v in self.sot_filters.items() if k != "search"}))
         for v in (fvar, lvar, vmin, vmax, mine):
             v.trace_add("write", fill)
             v.trace_add("write", remember)
         fill()
-        bar = ttk.Frame(win)
-        bar.pack(side="bottom", fill="x", padx=10, pady=(4, 10), before=box)   # always visible
-        ttk.Label(bar, text="Player:").pack(side="left")
-        pvar = tk.StringVar()
-        sel = self._selected_ids()
-        if len(sel) == 1 and sel[0] in tag_of:
-            pvar.set(tag_of[sel[0]])
-        ttk.Combobox(bar, textvariable=pvar, values=list(by_tag), width=28).pack(side="left", padx=6)
-
-        def on_pick(_=None):
-            s = rows.get((tv.selection() or [None])[0])
-            if s and s["id"] in master and s["id"] not in linked:
-                pvar.set(master[s["id"]])
-            elif s and s["login"].lower() in same and s["id"] not in linked:
-                pvar.set(same[s["login"].lower()])
-        tv.bind("<<TreeviewSelect>>", on_pick)
-
-        def link():
-            s = rows.get((tv.selection() or [None])[0])
-            typed = pvar.get().strip()
-            a = by_tag.get(typed) or next((x for t, x in by_tag.items() if t.casefold() == typed.casefold()), None)
-            if not s:
-                return self.set_status("Select a stream first.", error=True)
-            if not typed:
-                return self.set_status("Pick a player, or type any Xbox gamertag (e.g. copied from SOTREP).",
-                                       error=True)
-            if not a:
-                return lookup_and_link(s, typed)
-            try:
-                self.db.link_twitch(a["id"], s["id"], s["login"], s["name"])
-            except ValueError as e:
-                return self.set_status(str(e), error=True)
-            linked[s["id"]] = a["id"]
-            self.set_status(f"Linked {a['gamertag']} to Twitch channel {s['name']}.")
-            pvar.set("")                                                              # ready for the next one
-            fill()
-            tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])     # keep the stream selected
-            self.reload()
-            self.twitch_check_now(manual=True)
+        show_filters(self.db.get_setting("stream_filters", "1") == "1")
 
         def open_stream():
             for i in tv.selection():
                 webbrowser.open(f"https://www.twitch.tv/{rows[i]['login']}")
 
-        def lookup_and_link(s, typed):
-            """A gamertag that is not in the history: ask Xbox (OpenXBL search) for that exact account first."""
-            key = self.xkey.get()
-            if not key:
-                return self.set_status("Add an OpenXBL account to look up gamertags that are not in your list.",
-                                       error=True)
-            if "xboxlookup" in self.busy:
-                return
-            self._set_busy("xboxlookup", True)
-            self.set_status(f"Looking up '{typed}' on Xbox...")
-
-            def done(player, near, err):
-                self._set_busy("xboxlookup", False)
-                if err:
-                    return self.set_status(f"Xbox lookup failed: {err}", error=True)
-                if player is None:
-                    return self.set_status(f"No Xbox account named exactly '{typed}'."
-                                           + (f" Similar: {', '.join(near)}" if near else ""), error=True)
-                aid = self.db.ensure_account(player.gamertag, player.xuid)
-                acc = {"id": aid, "gamertag": player.gamertag}
-                by_tag[player.gamertag] = acc
-                tag_of[aid] = player.gamertag
-                try:
-                    self.db.link_twitch(aid, s["id"], s["login"], s["name"])
-                except ValueError as e:
-                    return self.set_status(str(e), error=True)
-                linked[s["id"]] = aid
-                self.set_status(f"Added {player.gamertag} (Xbox ID {player.xuid}) and linked Twitch channel {s['name']}.")
-                if win.winfo_exists():
-                    pvar.set("")                                                      # ready for the next one
-                    fill()
-                    tv.selection_set([i for i, r in rows.items() if r["id"] == s["id"]])
-                self.reload()
-                self.twitch_check_now(manual=True)
-
-            def work():
-                try:
-                    player, near = find_gamertag(key, typed)
-                    self.q.put(("call", lambda: done(player, near, None)))
-                except ProviderError as e:
-                    self.q.put(("call", lambda e=e: done(None, [], str(e))))
-                except Exception as e:
-                    self.q.put(("call", lambda e=e: done(None, [], f"Unexpected error: {e}")))
-
-            threading.Thread(target=work, daemon=True).start()
-
-        win.lookup_and_link = lookup_and_link
-
         def find_on_sotrep():
             for i in tv.selection():
                 webbrowser.open(sotrep.twitch_search_url(rows[i]["login"]))
 
+        def card_menu(e):
+            iid = tv.identify_row(e.y)
+            if not iid:
+                return
+            if iid not in tv.selection():
+                tv.selection_set([iid])
+            s = rows[iid]
+            m = self._menu(win)
+            m.add_command(label="Open stream", command=open_stream)
+            m.add_command(label="Find on SOTREP", command=find_on_sotrep)
+            m.add_separator()
+            m.add_command(label="Copy channel name", command=lambda: (self.root.clipboard_clear(),
+                                                                      self.root.clipboard_append(s["login"])))
+            m.tk_popup(e.x_root, e.y_root)
+
         tv.bind("<Double-1>", lambda e: open_stream())
-        ttk.Button(bar, text="Link", command=link).pack(side="left", padx=4)
-        ttk.Button(bar, text="Open stream", command=open_stream).pack(side="left", padx=4)
-        ttk.Button(bar, text="Find on SOTREP", command=find_on_sotrep).pack(side="left", padx=4)
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
-        ttk.Button(bar, text="Refresh", command=self.sot_streams).pack(side="right", padx=4)
+        tv.bind("<Button-3>", card_menu)
 
         def reset():
             """Back to the default view: no filters, most viewers first."""
             fvar.set("")
             lvar.set("All languages")
+            vrange.set("Any viewers")
             vmin.set("")
             vmax.set("")
             mine.set(False)
             sort.update(col=None, desc=False)
-            for c, _, w in cols:
-                tv.column(c, width=w)
             fill()
             remember()
             tv.yview_moveto(0)
-        ttk.Button(bar, text="Reset table", command=reset).pack(side="right", padx=4)
         win.reset = reset
-        win.streams_tv, win.player_var, win.filter_var, win.link = tv, pvar, fvar, link   # kept for tests
+        win.streams_tv, win.filter_var = tv, fvar                                       # kept for tests
         win.lang_var, win.vmin, win.vmax, win.mine, win.sort_by = lvar, vmin, vmax, mine, sort_by
-        win.find_on_sotrep = find_on_sotrep
-        win.minsize(760, 300)
-        self._place_dialog(win, 1040, 560)
+        win.find_on_sotrep, win.rep_btn = find_on_sotrep, rep_btn
+        win.minsize(780, 420)
+        if geo:
+            win.geometry(geo)
+        else:
+            self._place_dialog(win, 1000, 720)
 
     def never_link_selected(self):
         """Toggle 'never link a Twitch channel' (cheaters, ...) for the selected players."""
@@ -2157,7 +2791,8 @@ class App(SharedListMixin):
     def check_live_selected(self):
         ids = self._selected_ids()
         if not ids:
-            return messagebox.showinfo("Check live", "Select one or more players first (up to 20 at a time).")
+            return self.set_status("Check live: select one or more players first (up to 20 at a time).",
+                                   error=True)
         if not self.xkey.get() and not (self.tcreds.configured() and self.db.twitch_links(ids)):
             return self.set_status("Add an OpenXBL account first.", error=True)
         self._start_livecheck(ids if self.xkey.get() else [], ids)
@@ -2166,6 +2801,8 @@ class App(SharedListMixin):
         if "livecheck" in self.busy:
             return
         self._set_busy("livecheck", True)
+        if "live" not in self.pages:
+            self._loading_page("live", "Checking who is live...")
         self.set_status("Checking who is live..." if only_live else f"Checking {min(len(ids), 20)} selected player(s)...")
 
         def work():
@@ -2226,26 +2863,154 @@ class App(SharedListMixin):
         return f"{link['display_name']}: offline"
 
     def _show_live_results(self, results, only_live=False, note=""):
-        win = tk.Toplevel(self.root)
+        """Who is live, as cards: picture, name, what Xbox and Twitch say, viewers and how long. Double-click (or
+        Open Twitch) opens the linked channel; right-click for more."""
+        P = self.pal
+        self.last_live = (results, only_live, note)              # the tab shows these again without asking
+        geo = None
+        win = self.live_win = self._page("live", "Live now", closable=False, fresh=True)
+        live_n = sum(1 for r in results if self._is_live(r))
         win.title(f"Live now: {len(results)} player(s)" if only_live else "Live check results")
-        win.configure(bg=self.pal["bg"])
-        rows_shown = min(max(len(results), 1), 20 if only_live else 10)
-        ttk.Label(win, style="Hint.TLabel", wraplength=940, justify="left", text=(
-            (f"Everyone with source Live who is live right now. {note}\n" if only_live else "") +
-            ("Nobody is live right now.\n" if only_live and not results else "") +
-            "Xbox column: Xbox's own broadcasting flag for that exact account. Xbox misses streams started from a PC "
-            "and never gives the channel or title. Twitch column: only for players you linked to a channel, straight "
-            "from Twitch (exact channel ID). Double-click a row to open its Twitch channel.")
-        ).pack(fill="x", padx=10, pady=(10, 4))
-        cols = ("player", "state", "broadcast", "twitch", "game")
-        tv = ttk.Treeview(win, columns=cols, show="headings", height=rows_shown)
-        for c, t, w in (("player", "Player", 150), ("state", "Xbox says", 70), ("broadcast", "Xbox broadcasting", 250),
-                        ("twitch", "Twitch", 360), ("game", "Playing / last online", 150)):
-            tv.heading(c, text=t)
-            tv.column(c, width=w, anchor="w")
-        tv.tag_configure("live", background=self.pal["friend"])
+        win.configure(bg=P["bg"])
+        with self.db.lock:
+            ids = [r["id"] for r in results]
+            pics = {row[0]: row[1] for row in self.db.conn.execute(
+                f"SELECT a.id, p.pic FROM accounts a JOIN xbox_profiles p ON p.xuid = a.xuid "
+                f"WHERE a.id IN ({','.join('?' * len(ids))}) AND p.pic IS NOT NULL", ids)} if ids else {}
+            xuids = {row[0]: row[1] for row in self.db.conn.execute(
+                f"SELECT id, xuid FROM accounts WHERE id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
+
+        head = tk.Frame(win, bg=P["head"])
+        head.pack(fill="x")
+        top = tk.Frame(head, bg=P["head"])
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(top, text="Live now" if only_live else "Live check", bg=P["head"], fg=P["fg"],
+                 font=("Segoe UI", 15, "bold")).pack(side="left")
+        tk.Label(top, text=(f"{live_n} live" + ("" if only_live else f" of {len(results)} asked")),
+                 bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(12, 0))
+        chat_ui.RoundButton(top, "↻  Check again", self.check_live_all if only_live else self.check_live_selected,
+                            P, P["head"], kind="accent", pady=7).pack(side="right")
+        live_view = self.db.get_setting("live_view", "cards")
+        if live_view not in self.STREAM_ROWS:
+            live_view = "cards"
+        lview = {"v": live_view}
+        lview_var = tk.StringVar(value=self.VIEW_NAMES[live_view])
+
+        def pick_live_view():
+            v = {b: a for a, b in self.VIEW_NAMES.items()}[lview_var.get()]
+            self.db.set_setting("live_view", v)
+            lview["v"], tv.row, tv.gap = v, self.LIVE_ROWS[v], self.STREAM_GAPS[v]
+            tv.redraw()
+        chat_ui.PillSelect(top, P, P["head"], lview_var, values=list(self.VIEW_NAMES.values()),
+                           on_change=pick_live_view, prefix="View: ", pady=7).pack(side="right", padx=(0, 8))
+        win.set_view = lambda label: (lview_var.set(label), pick_live_view())        # for tests
+        tk.Label(head, text=((note + "  ") if note else "") + "Twitch: straight from Twitch for players you linked "
+                 "to a channel. Xbox: its own broadcasting flag, which misses streams started from a PC. Double-click "
+                 "a card to open the stream.", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9), anchor="w",
+                 justify="left", wraplength=820).pack(fill="x", padx=16, pady=(0, 12))
+
         logins = {}
-        for n, r in enumerate(results):
+        bold, small, tiny = ("Segoe UI", 11, "bold"), ("Segoe UI", 8), ("Segoe UI", 8, "bold")
+        by_iid = {}
+
+        def what(r):
+            tw, link = r.get("tw") or {}, r.get("tw_link")
+            if tw.get("live"):
+                return f"Twitch · {link['display_name']} · {tw.get('game') or 'no game set'} — {tw.get('title') or ''}"
+            if r["twitch"]:
+                return "Live on Twitch, says Xbox" + (f" · {r['viewers']:,} viewers" if r.get("viewers") else "")
+            if r["broadcasting"]:
+                return f"Broadcasting, says Xbox ({r['provider'] or 'service not stated'})"
+            if r["error"]:
+                return "Xbox not asked: " + r["error"]
+            return self._twitch_text(r) if link else "Not broadcasting"
+
+        def live_pill(c, r, right, cy, h=20):
+            tw = r.get("tw") or {}
+            if tw.get("live"):
+                return chat_ui.pill(c, right, cy, f"●  LIVE  {tw.get('viewers', 0):,}", self.LIVE_RED, "#ffffff",
+                                    tiny, h=h)
+            if r["twitch"] or r["broadcasting"]:
+                v = f"  {r['viewers']:,}" if r.get("viewers") is not None else ""
+                return chat_ui.pill(c, right, cy, f"●  LIVE{v}", self.LIVE_RED, "#ffffff", tiny, h=h)
+            return chat_ui.pill(c, right, cy, "offline", chat_ui._mix(P["panel"], P["fg"], 0.12), P["muted"], tiny,
+                                h=h)
+
+        def draw_line(c, iid, r, x1, y1, x2, y2, pic):
+            """Compact (a small picture) or Rows (none): one line per player."""
+            live, cy = self._is_live(r), (y1 + y2) / 2
+            tx = x1 + 12
+            if pic:
+                img = self.pictures.get(pics.get(r["id"]), tv.picture_arrived, size=32) if r["id"] in pics else None
+                chat_ui.draw_avatar(c, x1 + 26, cy, 14, r["gamertag"], xuids.get(r["id"]) or r["gamertag"], P, img,
+                                    dim=not live)
+                tx = x1 + 50
+            if (r.get("state") or "").casefold() == "online":
+                c.create_oval(tx - 1, cy - 4, tx + 7, cy + 4, fill="#4cc764", outline="")
+                tx += 14
+            px = live_pill(c, r, x2 - 12, cy, h=18 if pic else 16)
+            name_font = ("Segoe UI", 10, "bold") if pic else ("Segoe UI", 9, "bold")
+            nw = min(tkfont.Font(font=name_font).measure(r["gamertag"]), 180)
+            c.create_text(tx, cy, anchor="w", text=chat_ui.fit(r["gamertag"], name_font, nw), fill=P["fg"],
+                          font=name_font)
+            c.create_text(tx + nw + 12, cy, anchor="w", text=chat_ui.fit(what(r), ("Segoe UI", 9), px - tx - nw - 22),
+                          fill=P["fg"] if live else P["muted"], font=("Segoe UI", 9))
+
+        def draw(c, iid, values, tags, x1, y1, x2, y2, sel, hov):
+            r = by_iid[iid]
+            live, tw = self._is_live(r), r.get("tw") or {}
+            if lview["v"] == "rows":
+                tv.line(iid, x1, y1, x2, y2, sel, hov, stripe=self.LIVE_RED if live else None)
+                return draw_line(c, iid, r, x1, y1, x2, y2, pic=False)
+            tv.card(x1, y1, x2, y2, sel, hov, stripe=self.LIVE_RED if live else None)
+            if lview["v"] == "compact":
+                return draw_line(c, iid, r, x1, y1, x2, y2, pic=True)
+            cx, cy = x1 + 40, (y1 + y2) / 2
+            img = self.pictures.get(pics.get(r["id"]), tv.picture_arrived) if r["id"] in pics else None
+            chat_ui.draw_avatar(c, cx, cy, 20, r["gamertag"], xuids.get(r["id"]) or r["gamertag"], P, img,
+                                dim=not live)
+            if (r.get("state") or "").casefold() == "online":
+                c.create_oval(cx + 9, cy + 9, cx + 19, cy + 19, fill="#4cc764", outline=P["panel"], width=2)
+            right = x2 - 14
+            if tw.get("live"):
+                px = chat_ui.pill(c, right, y1 + 24, f"●  LIVE  {tw.get('viewers', 0):,}", self.LIVE_RED, "#ffffff",
+                                  tiny)
+                since = self._uptime(tw.get("started"), time.time())
+            elif r["twitch"] or r["broadcasting"]:
+                v = f"  {r['viewers']:,}" if r.get("viewers") is not None else ""
+                px = chat_ui.pill(c, right, y1 + 24, f"●  LIVE{v}", self.LIVE_RED, "#ffffff", tiny)
+                since = self._uptime(r.get("started"), time.time())
+            else:
+                px = chat_ui.pill(c, right, y1 + 24, "offline", chat_ui._mix(P["panel"], P["fg"], 0.12), P["muted"],
+                                  tiny)
+                since = ""
+            if since:
+                c.create_text(right, y2 - 18, anchor="e", text="live " + since, fill=P["muted"], font=small)
+            tx = cx + 32
+            c.create_text(tx, y1 + 20, anchor="w", text=chat_ui.fit(r["gamertag"], bold, px - tx - 12), fill=P["fg"],
+                          font=bold)
+            link = r.get("tw_link")
+            if tw.get("live"):
+                line = f"Twitch · {link['display_name']} · {tw.get('game') or 'no game set'} — {tw.get('title') or ''}"
+            elif r["twitch"]:
+                line = "Live on Twitch, says Xbox" + (f" · {r['viewers']:,} viewers" if r.get("viewers") else "")
+            elif r["broadcasting"]:
+                line = f"Broadcasting, says Xbox ({r['provider'] or 'service not stated'})"
+            elif r["error"]:
+                line = "Xbox not asked: " + r["error"]
+            else:
+                line = self._twitch_text(r) if link else "Not broadcasting"
+            c.create_text(tx, y1 + 41, anchor="w", text=chat_ui.fit(line, ("Segoe UI", 9), right - tx - 90),
+                          fill=P["fg"] if live else P["muted"], font=("Segoe UI", 9))
+            playing = r.get("title") or ""
+            if playing or r.get("state"):
+                c.create_text(tx, y1 + 59, anchor="w",
+                              text=chat_ui.fit(("Playing " + playing) if playing else (r.get("state") or ""), small,
+                                               right - tx - 90), fill=P["muted"], font=small)
+
+        tv = chat_ui.CardList(win, P, draw, row=self.LIVE_ROWS[live_view], gap=self.STREAM_GAPS[live_view],
+                              empty="Nobody is live right now" if only_live else "")
+        for r in results:
             if r["error"]:
                 bcast, state, game = "-" if only_live else f"not checked: {r['error']}", "-", ""
             else:
@@ -2261,13 +3026,44 @@ class App(SharedListMixin):
                 game = r["title"] or ""
             iid = tv.insert("", "end", tags=("live",) if self._is_live(r) else (), values=(
                 r["gamertag"], state or "", bcast, self._twitch_text(r), game))
+            by_iid[iid] = r
             if r.get("tw_link"):
                 logins[iid] = r["tw_link"]["login"]
-        tv.bind("<Double-1>", lambda e: [webbrowser.open(f"https://www.twitch.tv/{logins[i]}")
-                                         for i in tv.selection() if i in logins])
-        tv.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+
+        def open_twitch():
+            for i in tv.selection():
+                if i in logins:
+                    webbrowser.open(f"https://www.twitch.tv/{logins[i]}")
+
+        def card_menu(e):
+            iid = tv.identify_row(e.y)
+            if not iid:
+                return
+            tv.selection_set([iid])
+            r = by_iid[iid]
+            m = self._menu(win)
+            m.add_command(label="Open Twitch", command=open_twitch, state="normal" if iid in logins else "disabled")
+            m.add_command(label="SOTREP", command=lambda: webbrowser.open(sotrep.profile_url(r["gamertag"])))
+            m.add_command(label="Xbox profile", command=lambda: self.open_xbox_profile(r["gamertag"],
+                                                                                     xuids.get(r["id"]) or ""))
+            m.tk_popup(e.x_root, e.y_root)
+        tv.bind("<Double-1>", lambda e: open_twitch())
+        tv.bind("<Button-3>", card_menu)
+
+        bar = tk.Frame(win, bg=P["head"])
+        bar.pack(side="bottom", fill="x")
+        inner = tk.Frame(bar, bg=P["head"])
+        inner.pack(fill="x", padx=12, pady=10)
+        chat_ui.RoundButton(inner, "Open Twitch", open_twitch, P, P["head"], kind="accent", padx=18, pady=7).pack(
+            side="left")
+        tv.pack(fill="both", expand=True, padx=8, pady=(6, 0))
+        if results:
+            tv.selection_set([tv.get_children()[0]])
         win.results_tv = tv                          # kept for tests
-        self._place_dialog(win, 1000, 160 + 26 * rows_shown)
+        if geo:
+            win.geometry(geo)
+        else:
+            self._place_dialog(win, 860, min(760, 230 + 82 * max(1, min(len(results), 6))))
 
     def _on_livecheck(self, results, err, only_live=False, note=""):
         self._set_busy("livecheck", False)
@@ -2305,7 +3101,7 @@ class App(SharedListMixin):
                 self.set_status(f"Export failed: {e}", error=True)
 
     def import_dialog(self):
-        win = tk.Toplevel(self.root)
+        win = self._page("import", "Import players", fresh=True)
         win.title("Import players")
         win.configure(bg=self.pal["bg"])
         ttk.Label(win, text="Paste gamertags (one per line, optionally `gamertag,xuid`) or JSON.\n"
@@ -2339,7 +3135,7 @@ class App(SharedListMixin):
 
     def set_key(self):
         """Add an Xbox account: Microsoft sign-in (recommended) or an OpenXBL key."""
-        win = tk.Toplevel(self.root)
+        win = self._page("account", "Add Xbox account", fresh=True)
         win.title("Add Xbox account")
         win.configure(bg=self.pal["bg"])
         win.transient(self.root)
@@ -2378,10 +3174,10 @@ class App(SharedListMixin):
 
     def add_openxbl_key(self):
         webbrowser.open("https://xbl.io/dashboard")
-        k = simpledialog.askstring(
-            "OpenXBL key", "Sign in at xbl.io (opened in your browser) with your Microsoft account,\n"
-            "copy your API key from the dashboard and paste it here:", parent=self.root)
-        if not (k and k.strip()):
+        ok, k = self._question("OpenXBL key", "Sign in at xbl.io (opened in your browser) with your Microsoft "
+                               "account, copy your API key from the dashboard and paste it here:",
+                               [("Cancel", False, "soft"), ("Add key", True, "accent")], entry="")
+        if not ok or not (k and k.strip()):
             return
         self.set_status("Checking the key...")
         self._set_busy("key", True)
@@ -2444,7 +3240,7 @@ class App(SharedListMixin):
         self.to_top_after_sync = True
         self.reload(to_top=True)
         self.set_status(f"Switched to {self.xkey.active()}. Refreshing...")
-        self.msg_unread = []
+        self.msg_unread, self.req_waiting, self.msg_rounds = [], [], 0
         self._update_msg_button()
         self._schedule_messages(3_000)
         self.refresh_now(manual=True)
@@ -2452,8 +3248,8 @@ class App(SharedListMixin):
     def remove_account(self):
         name, key = self.xkey.active(), self.xkey.get()
         what = "Microsoft sign-in" if direct.is_ms_key(key) else "key"
-        if name and messagebox.askyesno("Remove account", f"Remove the saved {what} for '{name}'?\n"
-                                        "Your player history is kept."):
+        if name and self.ask_yes("Remove account", f"Remove the saved {what} for '{name}'? "
+                                 "Your player history is kept.", yes="Remove account", danger=True):
             if direct.is_ms_key(key):
                 self.msa.remove(key[len(MARK):])
             self.xkey.remove(name)
@@ -2480,7 +3276,7 @@ class App(SharedListMixin):
         if on:
             self._schedule_messages(1_000)
         else:
-            self.msg_unread = []
+            self.msg_unread, self.req_waiting = [], []
             self._update_msg_button()
         self.set_status("New Xbox messages pop up now (checked every minute, Microsoft sign-in accounts)." if on
                         else "No pop-ups for new Xbox messages.")
@@ -2499,6 +3295,9 @@ class App(SharedListMixin):
         if self.msg_popups.get() and direct.is_ms_key(key) and not self.msg_busy:
             self.msg_busy = True
 
+            ask_requests = self.msg_rounds % 3 == 0             # friend requests: every third round is plenty
+            self.msg_rounds += 1
+
             def work():
                 try:
                     chats, err = social.unread_chats(key), None
@@ -2506,7 +3305,14 @@ class App(SharedListMixin):
                     chats, err = None, str(e)
                 except Exception as e:                   # never let a worker thread die silently
                     chats, err = None, f"Unexpected error: {e}"
-                self.q.put(("call", lambda: self._after_messages(key, chats, err)))
+                reqs = None
+                if ask_requests:
+                    try:
+                        reqs = social.friend_requests(key)["received"]
+                    except Exception:                    # quiet: the next round tries again
+                        reqs = None
+                self.q.put(("call", lambda: (self._after_requests(key, reqs),
+                                             self._after_messages(key, chats, err))))
             threading.Thread(target=work, daemon=True).start()
         self._schedule_messages()
 
@@ -2524,15 +3330,47 @@ class App(SharedListMixin):
         if new:
             self._message_popup(new)
 
+    def _after_requests(self, key, received):
+        if received is None or self.closing or key != self.xkey.get() or not self.msg_popups.get():
+            return
+        seen = self.req_seen.setdefault(key, set())
+        new = [f for f in received if f["xuid"] not in seen]
+        seen.update(f["xuid"] for f in received)
+        self.req_waiting = list(received)
+        self._update_msg_button()
+        if new and (self.inbox_win is None or not self.inbox_win.winfo_exists()):
+            names = [f["gamertag"] for f in new if not str(f["gamertag"]).isdigit()] or ["Someone"]
+            title = (f"{names[0]} wants to be your friend" if len(new) == 1 else f"{len(new)} new friend requests")
+            self._toast("👋  " + title, "Click to accept or ignore." if len(new) == 1 else ", ".join(names[:5]),
+                        lambda: self.requests_dialog(goto=new[0]["xuid"] if len(new) == 1 else None))
+
+    def _requests_seen(self, received):
+        """The Friends & messages window loaded the requests: count them, and don't pop up for these."""
+        key = self.xkey.get() or ""
+        self.req_seen.setdefault(key, set()).update(f["xuid"] for f in received)
+        self.req_waiting = list(received)
+        self._update_msg_button()
+
+    def _request_answered(self, xuid):
+        self.req_waiting = [f for f in self.req_waiting if f["xuid"] != xuid]
+        self._update_msg_button()
+
     def _chat_opened(self, xuid):
         # at least the newest known message's own time, so a PC clock behind Xbox's still clears it
         self.msg_opened[xuid] = max([time.time()] + [c["at"] or 0 for c in self.msg_unread if c["xuid"] == xuid])
         self.msg_unread = [c for c in self.msg_unread if c["xuid"] != xuid]
         self._update_msg_button()
 
+    SOCIAL = "Friends & messages"
+
+    def _open_social(self):
+        """The tab opens on your friends (the pop-ups go straight to a chat or a request)."""
+        return self.inbox_dialog(tab="friends")
+
     def _update_msg_button(self):
-        n = len(self.msg_unread)
-        self.msg_btn.set_text(f"Messages ({n})" if n else "Messages")
+        n = len(self.msg_unread) + len(self.req_waiting)
+        base = self.msg_btn.base
+        self.msg_btn.set_text(f"{base} ({n})" if n else base)
         self.msg_btn.set_kind("accent" if n else "soft")
 
     def _message_popup(self, new):
@@ -2546,7 +3384,7 @@ class App(SharedListMixin):
             title = f"{len(new)} new Xbox messages"
             body = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
             goto = None
-        return self._toast("✉  " + title, body, lambda: self.inbox_dialog(goto=goto))
+        return self._toast("✉  " + title, body, lambda: self.inbox_dialog(goto=goto, tab="chats"))
 
     def _toast(self, title, text, on_click, seconds=12):
         """A small window at the bottom right of the screen, above other windows, that closes by itself. Clicking it
@@ -2566,7 +3404,7 @@ class App(SharedListMixin):
         body = tk.Label(inner, text=text, bg=P["head"], fg=P["fg"], font=("Segoe UI", 10), justify="left",
                         anchor="w", wraplength=320)
         body.pack(fill="x", padx=14)
-        foot = tk.Label(inner, text="Click to open Messages", bg=P["head"], fg=P["muted"], font=("Segoe UI", 8),
+        foot = tk.Label(inner, text="Click to open", bg=P["head"], fg=P["muted"], font=("Segoe UI", 8),
                         anchor="w")
         foot.pack(fill="x", padx=14, pady=(4, 10))
         close = tk.Label(inner, text="✕", bg=P["head"], fg=P["muted"], font=("Segoe UI", 10), cursor="hand2")
@@ -2695,6 +3533,8 @@ class App(SharedListMixin):
             self._set_busy("sync", False)
         if out.ok:
             self.db.apply_shared()                   # newly met players may be in the master list
+            if not imported:
+                self._crew_round()
             who = "" if imported or not self.xkey.active() else f" as {self.xkey.active()}"
             self.set_status(("Imported: " if imported else f"Synced{who}: ") + out.message)
         else:
@@ -2741,11 +3581,11 @@ class App(SharedListMixin):
                 elif kind == "update":
                     info, err, manual = val
                     if err and manual:
-                        messagebox.showwarning("Updates", err)
+                        self.set_status(f"Update check failed: {err}", error=True)
                     elif info:
                         self._offer_update(info)
                     elif manual:
-                        messagebox.showinfo("Updates", "You are up to date.")
+                        self.set_status(f"You are up to date (version {__version__}).")
         except queue.Empty:
             pass
         if not self.closing:
@@ -2782,17 +3622,18 @@ class App(SharedListMixin):
         self._schedule_live()
 
     def _offer_update(self, info):
-        text = f"Version {info.version} is available (you have {__version__}).\n\n{info.notes[:800]}\n\n"
+        text = f"Version {info.version} is available (you have {__version__}).\n\n{info.notes[:600]}"
         if not (info.exe_url and updater.running_exe()):        # running from source, or no program file
-            if messagebox.askyesno("Update available", text + "Open the release page?"):
+            if self.ask_yes("Update available", text, yes="Open release page"):
                 webbrowser.open(info.url)
             return
-        answer = messagebox.askyesnocancel("Update available", text + (
-            "Yes: update now (downloads the new version from GitHub, checks it and restarts the app)\n"
-            "No: open the release page\nCancel: later"))
-        if answer:
+        answer = self._question("Update available", text + "\n\nUpdate now downloads the new version from GitHub, "
+                                "checks it and restarts the app.",
+                                [("Later", None, "soft"), ("Release page", "page", "soft"),
+                                 ("Update now", "update", "accent")])
+        if answer == "update":
             self.update_now(info)
-        elif answer is False:
+        elif answer == "page":
             webbrowser.open(info.url)
 
     def update_now(self, info):
@@ -2815,11 +3656,13 @@ class App(SharedListMixin):
                 self._set_busy("update", False)
                 if err:
                     self.set_status(f"Update failed: {err}", error=True)
-                    if messagebox.askyesno("Update failed", f"{err}\n\nOpen the release page instead?"):
+                    if self.ask_yes("Update failed", f"{err}\n\nOpen the release page instead?",
+                                    yes="Open release page"):
                         webbrowser.open(info.url)
                     return
                 self.set_status(f"Version {info.version} is installed; it is used from the next start of the app.")
-                if messagebox.askyesno("Update installed", f"Version {info.version} is installed. Restart now?"):
+                if self.ask_yes("Update installed", f"Version {info.version} is installed. Restart now?",
+                                yes="Restart", no="Later"):
                     self.restart(exe)
             self.q.put(("call", done))
 

@@ -7,7 +7,7 @@ Endpoints, from OpenXBL's own OpenAPI document:
 * GET    /v2/friends          your friends, with presenceState / presenceText
 * POST   /v2/conversations    {"xuid": ..., "message": ...} sends an Xbox message
 
-There is no endpoint to invite someone into a game or to join someone's game, so the app does not offer that.
+Inviting someone into a game or joining theirs isn't offered: Xbox only allows that inside the game and its own apps.
 Every action here is done only when the user clicks for it; nothing is sent automatically.
 """
 import json
@@ -98,12 +98,19 @@ def parse_friend_list(payload, in_list: bool = True) -> List[dict]:
         if not x:
             continue
         mine, theirs = p.get("isFollowedByCaller"), p.get("isFollowingCaller")
+        if p.get("isFriend") is True:                          # Xbox's friend system: a request accepted
+            mine = theirs = True
+        elif p.get("isFriendRequestSent") is True:
+            mine, theirs = "sent", False
+        elif p.get("isFriendRequestReceived") is True:
+            mine, theirs = False, "asks"
         out.append({
             "xuid": x, "gamertag": str(p.get("gamertag") or p.get("displayName") or x),
             "state": str(p.get("presenceState") or "Unknown"), "text": str(p.get("presenceText") or ""),
             "favorite": bool(p.get("isFavorite")),
-            "relation": ("Friend" if mine and theirs else "You follow" if mine else "Follows you" if theirs
-                         else "In your list" if in_list else "Not in your list"),
+            "relation": ("Friend" if mine is True and theirs is True else "Request sent" if mine == "sent"
+                         else "Wants to be friends" if theirs == "asks" else "You follow" if mine
+                         else "Follows you" if theirs else "In your list" if in_list else "Not in your list"),
             "last_seen": _iso_to_epoch(p.get("lastSeenDateTimeUtc")), "pic": str(p.get("displayPicRaw") or "")})
     out.sort(key=lambda f: (f["state"].casefold() != "online", not f["favorite"], f["gamertag"].casefold()))
     return out
@@ -176,12 +183,6 @@ def xbox_app_installed() -> bool:
     return _registered("msxbox")
 
 
-# Game invites and joining exist only inside Xbox's own UI. On PC that is Game Bar's "Xbox Social" widget (right-click
-# a friend: Invite to game / Join game, while you play). The widget's ID comes from the Xbox app's manifest
-# (gameBarUIExtension Id="SocialWidget"); the link form is the one Microsoft's apps use for their other widgets.
-GAMEBAR_SOCIAL = "ms-gamebar://launchForeground/activate/Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"
-
-
 # Game Bar shares the Xbox app's Windows sign-in, so signing in there as another account switches Game Bar too.
 # The app is started normally: its sign-in link (msxbox://signIn/, from its jump list) showed the login screen once
 # but left the Xbox app stuck on "Launching" twice (2026-11 and 2026-11-20), so it is not used.
@@ -193,17 +194,6 @@ def open_xbox_app(start=None, installed=xbox_app_installed) -> bool:
         return False
     try:
         (start or _start)(XBOX_APP)
-        return True
-    except OSError:
-        return False
-
-
-def open_gamebar_social(start=None, installed=lambda: _registered("ms-gamebar")) -> bool:
-    """Open Game Bar on the Xbox Social widget. False when Game Bar is missing or refused the link."""
-    if not installed():
-        return False
-    try:
-        (start or _start)(GAMEBAR_SOCIAL)
         return True
     except OSError:
         return False
@@ -406,3 +396,121 @@ def search_players(key: str, term: str, call: Call = None) -> List[dict]:
 
 def friend_list(key: str, call: Call = None) -> List[dict]:
     return parse_friend_list((call or openxbl_call)("GET", FRIENDS_URL, key))
+
+
+# ---- Sea of Thieves ships (Xbox multiplayer sessions; Microsoft sign-in only)
+SOT_SCID = "00000000-0000-0000-0000-000066591171"         # Sea of Thieves' Xbox service config (from titlehub)
+# Joining or inviting from the app isn't possible: Sea of Thieves ignores join links opened by another program
+# (both its own ms-xbl-66591171 link and ms-xbl-multiplayer were tried for real, with the Store and the Steam version,
+# 2026-11-23), and Xbox only lets the game itself write invites (HTTP 403). So the app only shows who is on which ship.
+SHIPS = {2: "sloop", 3: "brigantine", 4: "galleon"}         # by crew size
+def parse_sessions(payload) -> dict:
+    """owner XUID -> {handle, ship, members, max, open, session} for Sea of Thieves activity handles (the same
+    information the Xbox app shows as "Join game"). Shape seen for real: results[] with id, ownerXuid, sessionRef
+    and relatedInfo (membersCount, maxMembersCount, closed, joinRestriction)."""
+    content = payload.get("content") if isinstance(payload, dict) else None
+    results = content.get("results") if isinstance(content, dict) else None
+    if not isinstance(results, list):
+        raise ProviderError("Unexpected session list from Xbox.")
+    out = {}
+    for r in results:
+        if not isinstance(r, dict) or str(r.get("titleId")) != SOT_TITLE_ID:
+            continue
+        owner, handle = _xuid(r.get("ownerXuid")), str(r.get("id") or "")
+        if not owner or not handle or not all(ch.isalnum() or ch == "-" for ch in handle):
+            continue
+        info = r.get("relatedInfo") if isinstance(r.get("relatedInfo"), dict) else {}
+        members, most = int(info.get("membersCount") or 0), int(info.get("maxMembersCount") or 0)
+        out[owner] = {"handle": handle, "ship": SHIPS.get(most, "ship"), "members": members, "max": most,
+                      "crew": parse_members({"members": r.get("members")}) if r.get("members") else [],
+                      "open": not info.get("closed") and (not most or members < most),
+                      "restriction": str(info.get("joinRestriction") or ""),
+                      "session": r.get("sessionRef") if isinstance(r.get("sessionRef"), dict) else None}
+    return out
+
+
+def parse_members(session) -> List[dict]:
+    """[{xuid, gamertag}] of the people in an Xbox multiplayer session document."""
+    members = session.get("members") if isinstance(session, dict) else None
+    out = []
+    for _, m in sorted((members or {}).items(), key=lambda kv: str(kv[0])) if isinstance(members, dict) else []:
+        if not isinstance(m, dict):
+            continue
+        system = (m.get("constants") or {}).get("system") or {} if isinstance(m.get("constants"), dict) else {}
+        x = _xuid(system.get("xuid") or m.get("xuid"))
+        if x:
+            out.append({"xuid": x, "gamertag": str(m.get("gamertag") or x)})
+    return out
+
+
+def my_crew(key: str, call: Call = None) -> Optional[dict]:
+    """Your ship right now: {ship, session, members (everyone else aboard), max}, or None when you aren't on one."""
+    _ms_only(key)
+    from .msauth import MARK
+    me = key.strip()[len(MARK):]
+    payload = (call or openxbl_call)("GET", API + "sessions/sot/crew", key)
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, dict):
+        return None
+    ship = parse_sessions({"content": {"results": [content.get("handle")]}}).get(me)
+    if not ship:
+        return None
+    ref = ship.get("session") or {}
+    return {"ship": ship["ship"], "max": ship["max"], "session": str(ref.get("name") or ship["handle"]),
+            "members": [m for m in parse_members(content.get("session")) if m["xuid"] != me]}
+
+
+def ship_label(s: dict) -> str:
+    """'on a brigantine · 2/3' (or 'full')."""
+    crew = f"{s['members']}/{s['max']}" if s.get("max") else ""
+    return f"on a {s['ship']}" + (f" · {crew}" if crew else "") + ("" if s["open"] else " · full")
+
+
+def ships(key: str, call: Call = None) -> dict:
+    """Ships of the people you follow and your friends, by owner XUID."""
+    _ms_only(key)
+    return parse_sessions((call or openxbl_call)("GET", API + "sessions/sot", key))
+
+
+def parse_requests(payload) -> dict:
+    """{"received": [...], "sent": [...]} friend requests, each like a friend_list entry plus "at" (when).
+    Xbox marks each person isFriendRequestReceived / isFriendRequestSent (seen for real, peoplehub contract 7), but
+    its received list sometimes also holds people you sent a request to, flagged as received (seen for real
+    2026-11-23). So the sent list is read first and anyone in it counts as sent, never as received."""
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, dict):
+        raise ProviderError("Unexpected friend requests from Xbox.")
+    out = {"received": [], "sent": []}
+    seen = set()
+    for side, flag in (("sent", "isFriendRequestSent"), ("received", "isFriendRequestReceived")):
+        people = [p for p in ((content.get(side) or {}).get("people") or []) if isinstance(p, dict)]
+        for p in people:
+            if p.get(flag) is not True or p.get("isFriend") is True:
+                continue
+            for f in parse_friend_list({"people": [p]}, in_list=False):
+                if f["xuid"] in seen:
+                    continue
+                seen.add(f["xuid"])
+                f["at"] = _iso_to_epoch(p.get("addedDateTimeUtc"))
+                out[side].append(f)
+    for side in out:
+        out[side].sort(key=lambda f: -(f["at"] or 0))
+    return out
+
+
+def friend_requests(key: str, call: Call = None) -> dict:
+    """Friend requests waiting for you and the ones you sent (Microsoft sign-in only: OpenXBL has none)."""
+    _ms_only(key)
+    return parse_requests((call or openxbl_call)("GET", FRIENDS_URL + "/requests", key))
+
+
+def accept_friend(key: str, xuid, call: Call = None) -> None:
+    """Accept a friend request: you become friends on Xbox."""
+    _ms_only(key)
+    (call or openxbl_call)("POST", FRIENDS_URL + "/requests/accept", key, {"xuid": _check_xuid(xuid)})
+
+
+def ignore_friend(key: str, xuid, call: Call = None) -> None:
+    """Ignore (decline) a friend request, or take back one you sent: the request is removed on Xbox."""
+    _ms_only(key)
+    (call or openxbl_call)("DELETE", FRIENDS_URL + "/" + _check_xuid(xuid), key)

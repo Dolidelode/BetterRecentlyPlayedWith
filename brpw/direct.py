@@ -35,6 +35,16 @@ def configure(accounts) -> None:
         _accounts = accounts
 
 
+def _session(handle: dict, auth: str) -> dict:
+    """The multiplayer session an activity handle points to (sessiondirectory, documented)."""
+    ref = handle.get("sessionRef") if isinstance(handle.get("sessionRef"), dict) else {}
+    parts = [str(ref.get(k) or "") for k in ("scid", "templateName", "name")]
+    if not all(p and all(ch.isalnum() or ch in "-_" for ch in p) for p in parts):
+        raise ProviderError("Unexpected session reference from Xbox.")
+    return _request("GET", "https://sessiondirectory.xboxlive.com/serviceconfigs/{}/sessionTemplates/{}/sessions/{}"
+                    .format(*parts), auth, "107")
+
+
 def is_ms_key(key: Optional[str]) -> bool:
     from .msauth import MARK
     return bool(key) and str(key).strip().startswith(MARK)
@@ -106,7 +116,57 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
     if m == "GET" and path == "recent-players":
         return {"content": {"people": flatten_recent(_request("GET", PEOPLEHUB + "/recentplayers", auth, "5"))}}
     if m == "GET" and path == "friends" and not q.get("xuid"):
-        return {"content": _request("GET", PEOPLEHUB + "/social/decoration/presencedetail", auth, "5")}
+        # Xbox's friend system keeps real friends (a request accepted) in /friends; /social only has who follows
+        # whom. Seen for real 2026-11-23: 113 friends there, 12 follows (none of them friends) in /social. Both,
+        # friends first, each person once.
+        friends = _request("GET", PEOPLEHUB + "/friends/decoration/presencedetail", auth, "7")
+        follows = _request("GET", PEOPLEHUB + "/social/decoration/presencedetail", auth, "7")
+        people, seen = [], set()
+        for p in (friends.get("people") or []) + (follows.get("people") or []):
+            if isinstance(p, dict) and p.get("xuid") not in seen:
+                seen.add(p.get("xuid"))
+                people.append(p)
+        return {"content": {"people": people}}
+    if m == "GET" and path == "sessions/sot":
+        # Xbox multiplayer sessions (sessiondirectory, documented): Sea of Thieves activity handles, the "Join game"
+        # information. Needs the game's service config ID, else Xbox answers 403.
+        from .social import SOT_SCID
+        url = "https://sessiondirectory.xboxlive.com/handles/query?include=relatedInfo"
+        results, seen = [], set()
+        for moniker in ("friends", "people"):           # friends (Xbox's friend system) and who you follow
+            j = _request("POST", url, auth, "107", {"type": "activity", "scid": SOT_SCID, "owners": {
+                "people": {"moniker": moniker, "monikerXuid": tok["xuid"]}}})
+            for r in j.get("results") or []:
+                if isinstance(r, dict) and r.get("id") not in seen:
+                    seen.add(r.get("id"))
+                    results.append(r)
+        for r in results[:12]:                          # who is aboard (sessions friends may read)
+            try:
+                r["members"] = (_session(r, auth).get("members") or {})
+            except ProviderError:
+                pass
+        return {"content": {"results": results}}
+    if m == "GET" and path == "sessions/sot/crew":
+        # your own ship: your activity handle, then that session's member list (seen for real: members by index,
+        # each with gamertag and constants.system.xuid)
+        from .social import SOT_SCID
+        j = _request("POST", "https://sessiondirectory.xboxlive.com/handles/query?include=relatedInfo", auth, "107",
+                     {"type": "activity", "scid": SOT_SCID, "owners": {"xuids": [tok["xuid"]]}})
+        mine = [r for r in j.get("results") or [] if isinstance(r, dict) and str(r.get("ownerXuid")) == tok["xuid"]]
+        if not mine:
+            return {"content": None}
+        return {"content": {"handle": mine[0], "session": _session(mine[0], auth)}}
+    if m == "GET" and path == "friends/requests":
+        return {"content": {side: _request("GET", f"{PEOPLEHUB}/friendrequests({side})/decoration/presencedetail",
+                                           auth, "7") for side in ("received", "sent")}}
+    if m == "POST" and path == "friends/requests/accept" and isinstance(data, dict):
+        # as the Xbox app's social service takes it (bulk add, contract 3); seen in an open-source Xbox client
+        x = str(data.get("xuid") or "")
+        if not x.isdigit():
+            raise ProviderError("No XUID for the friend request.")
+        _request("POST", "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add", auth, "3",
+                 {"xuids": [x]})
+        return {}
     if m == "GET" and path.startswith("player/summary/"):
         xuids = [x for x in path.split("/", 2)[2].split(",") if x.isdigit()]
         return {"content": _request("GET", f"{PEOPLEHUB}/xuids({','.join(xuids)})/decoration/{SUMMARY_DECORATIONS}",
@@ -123,7 +183,13 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
         return {"content": _request("GET", "https://profile.xboxlive.com/users/me/profile/settings"
                                     "?settings=Gamertag,GameDisplayPicRaw",
                                     auth, "2")}
-    if m in ("PUT", "DELETE") and re.fullmatch(r"friends/\d+", path):
+    if m == "PUT" and re.fullmatch(r"friends/\d+", path):
+        # Xbox's friend system: the same bulk add as accepting sends a friend request when none is waiting. The old
+        # per-person PUT on social.xboxlive.com only follows and no longer makes anyone a friend.
+        _request("POST", "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add", auth, "3",
+                 {"xuids": [path.split("/")[1]]})
+        return {}
+    if m == "DELETE" and re.fullmatch(r"friends/\d+", path):
         target = path.split("/")[1]
         _request(m, f"https://social.xboxlive.com/users/xuid({tok['xuid']})/people/xuid({target})", auth, "2")
         return {}

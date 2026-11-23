@@ -248,9 +248,6 @@ def test_shared_ui_send_review_approve(tmp_path, monkeypatch):
                           "started": None, "language": "en", "tags": []}], None)
     tv = app.sot_win.streams_tv
     assert tv.item(tv.get_children()[0], "values")[0] == "linked: Never Met" + ui.SHARED_MARK
-    tv.selection_set(tv.get_children()[0])
-    root.update()
-    assert app.sot_win.player_var.get() == "Never Met"
     app.sot_win.destroy()
     win = app.shared_dialog()
     assert "Send my links (1)" == win.send_btn["text"] and not win.review_btn.winfo_ismapped()

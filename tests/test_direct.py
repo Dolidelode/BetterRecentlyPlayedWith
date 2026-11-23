@@ -69,8 +69,9 @@ def test_every_openxbl_address_maps_to_the_xbox_service(routed):
     providers.openxbl_json(providers.OPENXBL_ACCOUNT_URL, None, {"X-Authorization": key})
     got = [(m, u, v) for m, u, v, d in seen]
     assert got == [
-        ("GET", "https://peoplehub.xboxlive.com/users/me/people/social/decoration/presencedetail", "5"),
-        ("PUT", f"https://social.xboxlive.com/users/xuid({XUID})/people/xuid(123)", "2"),
+        ("GET", "https://peoplehub.xboxlive.com/users/me/people/friends/decoration/presencedetail", "7"),
+        ("GET", "https://peoplehub.xboxlive.com/users/me/people/social/decoration/presencedetail", "7"),
+        ("POST", "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add", "3"),
         ("DELETE", f"https://social.xboxlive.com/users/xuid({XUID})/people/xuid(123)", "2"),
         ("POST", f"https://msg.xboxlive.com/users/xuid({XUID})/outbox", "3"),
         ("GET", "https://xblmessaging.xboxlive.com/network/Xbox/users/me/conversations/users/xuid(123)?maxItems=100",
@@ -80,7 +81,7 @@ def test_every_openxbl_address_maps_to_the_xbox_service(routed):
                 "detail,presenceDetail,multiplayerSummary", "5"),
         ("GET", "https://userpresence.xboxlive.com/users/xuid(1)?level=all", "3"),
         ("GET", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,GameDisplayPicRaw", "2")]
-    assert seen[3][3] == {"header": {"recipients": [{"xuid": 123}]}, "messageText": "ahoy"}
+    assert seen[4][3] == {"header": {"recipients": [{"xuid": 123}]}, "messageText": "ahoy"}
     with pytest.raises(ProviderError):
         providers.openxbl_json("https://api.xbl.io/v2/clubs", None, {"X-Authorization": key})
 
@@ -259,3 +260,91 @@ def test_hours_played_go_to_xbox_userstats(routed):
     assert (m, u, v) == ("POST", "https://userstats.xboxlive.com/batch", "2")
     assert d == {"arrangebyfield": "xuid", "xuids": ["5", "6"],
                  "stats": [{"name": "MinutesPlayed", "titleid": "1717113201"}]}
+
+
+def test_friend_requests_map_to_peoplehub_and_the_social_service(routed):
+    seen, _ = routed
+    key = msauth.MARK + XUID
+    social.friend_requests(key)
+    social.accept_friend(key, "77")
+    social.ignore_friend(key, "78")
+    PH = "https://peoplehub.xboxlive.com/users/me/people/friendrequests"
+    assert [(m, u, v) for m, u, v, d in seen] == [
+        ("GET", PH + "(received)/decoration/presencedetail", "7"), ("GET", PH + "(sent)/decoration/presencedetail", "7"),
+        ("POST", "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add", "3"),
+        ("DELETE", f"https://social.xboxlive.com/users/xuid({XUID})/people/xuid(78)", "2")]
+    assert seen[2][3] == {"xuids": ["77"]}
+    with pytest.raises(ProviderError):                       # OpenXBL has no friend requests
+        social.friend_requests("an-openxbl-key")
+
+
+def test_friend_requests_follow_xboxs_own_flags():
+    def person(x, **flags):
+        return dict({"xuid": x, "gamertag": "P" + x, "presenceState": "Online", "addedDateTimeUtc": "2026-11-20T10:00:00Z"},
+                    **flags)
+    res = social.parse_requests({"content": {
+        "received": {"people": [person("1", isFriendRequestReceived=True),
+                                person("2", isFriendRequestSent=True),        # Xbox lists sent ones here too
+                                person("3", isFriendRequestReceived=True, isFriend=True)]},
+        "sent": {"people": [person("2", isFriendRequestSent=True)]}}})
+    assert [f["xuid"] for f in res["received"]] == ["1"] and [f["xuid"] for f in res["sent"]] == ["2"]
+    assert res["received"][0]["relation"] == "Wants to be friends" and res["sent"][0]["relation"] == "Request sent"
+    assert res["received"][0]["at"]
+    mixed = social.parse_requests({"content": {                              # Xbox listing a sent one as received
+        "received": {"people": [person("5", isFriendRequestReceived=True), person("1", isFriendRequestReceived=True)]},
+        "sent": {"people": [person("5", isFriendRequestSent=True)]}}})
+    assert [f["xuid"] for f in mixed["received"]] == ["1"] and [f["xuid"] for f in mixed["sent"]] == ["5"]
+
+
+def _handle(owner, hid, members=1, most=3, closed=False):
+    return {"type": "activity", "id": hid, "ownerXuid": owner, "titleId": "1717113201",
+            "sessionRef": {"scid": social.SOT_SCID, "templateName": "MediumShipSessionTemplate", "name": "s-" + hid},
+            "relatedInfo": {"membersCount": members, "maxMembersCount": most, "closed": closed,
+                            "joinRestriction": "followed"}}
+
+
+def test_ships_come_from_xbox_sessions(monkeypatch):
+    seen = []
+
+    def fake_request(method, url, auth, version, data=None, timeout=20):
+        seen.append((method, url, version, data))
+        return {"results": [_handle("77", "h-1"), _handle("78", "h-2", members=4, most=4),
+                            dict(_handle("79", "h-3"), titleId="123")]}               # another game: ignored
+    monkeypatch.setattr(direct, "_request", fake_request)
+    direct.configure(FakeAccounts())
+    try:
+        s = social.ships(msauth.MARK + XUID)
+        assert set(s) == {"77", "78"} and social.ship_label(s["77"]) == "on a brigantine · 1/3"
+        assert social.ship_label(s["78"]) == "on a galleon · 4/4 · full"
+        queries = [d for m, u, v, d in seen if u.endswith("/handles/query?include=relatedInfo")]
+        assert all(d["scid"] == social.SOT_SCID for d in queries)               # Xbox needs the game's config
+        assert {d["owners"]["people"]["moniker"] for d in queries} == {"friends", "people"}
+        with pytest.raises(ProviderError):                                     # OpenXBL keys can't
+            social.ships("an-openxbl-key")
+    finally:
+        direct.configure(None)
+
+
+def test_your_crew_comes_from_your_ship_session(monkeypatch):
+    seen = []
+    doc = {"members": {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}},
+                       "1": {"gamertag": "Salty", "constants": {"system": {"xuid": "77"}}},
+                       "2": {"gamertag": "Kraken", "constants": {"system": {"xuid": "78"}}}}}
+
+    def fake_request(method, url, auth, version, data=None, timeout=20):
+        seen.append((method, url, version))
+        if "/sessions/" in url:
+            return doc
+        return {"results": [dict(_handle(XUID, "mine", members=3, most=3))]}
+    monkeypatch.setattr(direct, "_request", fake_request)
+    direct.configure(FakeAccounts())
+    try:
+        crew = social.my_crew(msauth.MARK + XUID)
+        assert crew["ship"] == "brigantine" and crew["session"] == "s-mine"
+        assert crew["members"] == [{"xuid": "77", "gamertag": "Salty"}, {"xuid": "78", "gamertag": "Kraken"}]
+        assert seen[-1] == ("GET", "https://sessiondirectory.xboxlive.com/serviceconfigs/" + social.SOT_SCID +
+                            "/sessionTemplates/MediumShipSessionTemplate/sessions/s-mine", "107")
+        monkeypatch.setattr(direct, "_request", lambda *a, **k: {"results": []})
+        assert social.my_crew(msauth.MARK + XUID) is None                       # not on a ship
+    finally:
+        direct.configure(None)

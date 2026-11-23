@@ -163,6 +163,16 @@ class TwitchClient:
                 out[str(u["id"])] = TwitchUser(str(u["id"]), str(u["login"]), str(u.get("display_name") or u["login"]))
         return out
 
+    def profile_pictures(self, ids: List[str]) -> Dict[str, str]:
+        """id -> profile picture address (100 per request)."""
+        out: Dict[str, str] = {}
+        ids = sorted(set(ids))
+        for i in range(0, len(ids), CHUNK):
+            for u in self._get("users", [("id", x) for x in ids[i:i + CHUNK]]).get("data") or []:
+                if u.get("profile_image_url"):
+                    out[str(u["id"])] = str(u["profile_image_url"])
+        return out
+
     def game_id(self, name: str = SOT_GAME) -> str:
         if name not in self._game_ids:
             data = self._get("games", [("name", name)]).get("data") or []
@@ -183,7 +193,9 @@ class TwitchClient:
                                 "name": str(s.get("user_name") or s.get("user_login") or ""),
                                 "title": str(s.get("title") or ""), "viewers": int(s.get("viewer_count") or 0),
                                 "started": _iso_to_epoch(s.get("started_at")), "language": str(s.get("language") or ""),
-                                "tags": [str(t) for t in s.get("tags") or []]})
+                                "tags": [str(t) for t in s.get("tags") or []],
+                                "thumb": str(s.get("thumbnail_url") or "").replace("{width}", "320")
+                                .replace("{height}", "180")})
             after = (r.get("pagination") or {}).get("cursor")
             if not after or not r.get("data"):
                 break

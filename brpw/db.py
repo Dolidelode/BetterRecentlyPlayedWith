@@ -155,7 +155,15 @@ def _m12(c):
         xuid TEXT PRIMARY KEY, pic TEXT, pic_at INTEGER, minutes INTEGER, stats_at INTEGER)""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10, _m11, _m12]  # migrates user_version i -> i+1
+def _m13(c):
+    # Crewmates: who was on your ship (Xbox session members), in how many different sessions, and whether the app
+    # already tagged them "crew" (done once; untagging is respected).
+    c.execute("""CREATE TABLE crew(
+        owner TEXT NOT NULL, xuid TEXT NOT NULL, gamertag TEXT NOT NULL, sessions INTEGER NOT NULL DEFAULT 0,
+        last_session TEXT, last_at INTEGER, tagged INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner, xuid))""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10, _m11, _m12, _m13]  # migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -261,6 +269,59 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
     # ---- merging observations ----
+    CREW_TAG = "crew"
+    CREW_SESSIONS = 2                    # sailed together in this many different sessions: a crewmate
+
+    def note_crew(self, owner: str, session: str, members: List[dict], now: Optional[int] = None) -> List[str]:
+        """Count each person aboard your ship once per session. Someone who reaches CREW_SESSIONS gets the tag
+        "crew" (once: if you remove it, it stays removed). Returns the gamertags newly tagged."""
+        now, owner, newly = int(now or time.time()), owner or "", []
+        for m in members:
+            x, gt = str(m.get("xuid") or ""), str(m.get("gamertag") or "")
+            if not x.isdigit() or not gt:
+                continue
+            with self.lock, self.conn:
+                row = self.conn.execute("SELECT sessions, last_session, tagged FROM crew WHERE owner=? AND xuid=?",
+                                        (owner, x)).fetchone()
+                sessions = (row["sessions"] if row else 0) + (0 if row and row["last_session"] == session else 1)
+                self.conn.execute("""INSERT INTO crew(owner, xuid, gamertag, sessions, last_session, last_at, tagged)
+                    VALUES(?,?,?,?,?,?,0) ON CONFLICT(owner, xuid) DO UPDATE SET gamertag=excluded.gamertag,
+                    sessions=excluded.sessions, last_session=excluded.last_session, last_at=excluded.last_at""",
+                                  (owner, x, gt, sessions, session, now))
+                due = sessions >= self.CREW_SESSIONS and not (row and row["tagged"])
+                if due:
+                    self.conn.execute("UPDATE crew SET tagged=1 WHERE owner=? AND xuid=?", (owner, x))
+            if due:
+                self.add_tag([self.ensure_account(gt, x, source="crew")], self.CREW_TAG)
+                newly.append(gt)
+        return newly
+
+    def prune(self, days: int, now: Optional[int] = None) -> int:
+        """Forget players not seen for `days` days, so the history doesn't grow forever. Kept whatever their age:
+        players with a tag, a 'never link' mark, a Twitch link you made that isn't on the shared master list yet,
+        and players in a current recently-played list. The master list itself is separate and never touched; a
+        forgotten player who shows up again gets their channel back from it. Returns how many were forgotten."""
+        if not days or days <= 0:
+            return 0
+        cut = int(now or time.time()) - int(days) * 86400
+        with self.lock, self.conn:
+            ids = [r[0] for r in self.conn.execute("""
+                SELECT a.id FROM accounts a WHERE a.last_seen < ?
+                  AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.account_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM twitch_never n WHERE n.account_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM twitch_links l WHERE l.account_id = a.id AND l.source <> 'shared'
+                                  AND NOT EXISTS (SELECT 1 FROM shared_links s
+                                                  WHERE s.xuid = a.xuid AND s.twitch_id = l.twitch_id))
+                  AND NOT EXISTS (SELECT 1 FROM latest_list b WHERE b.account_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM latest_by_owner b WHERE b.account_id = a.id)""", (cut,))]
+            self.conn.executemany("DELETE FROM accounts WHERE id = ?", [(i,) for i in ids])   # cascades to the rest
+            self.conn.execute("DELETE FROM xbox_profiles WHERE xuid NOT IN "
+                              "(SELECT xuid FROM accounts WHERE xuid IS NOT NULL)")
+        if ids:
+            with self.lock:
+                self.conn.execute("VACUUM")              # give the space back to the disk
+        return len(ids)
+
     def merge_players_with_pictures(self, players: List[Player], *args, **kw):
         """merge_players, then keep the profile pictures the source sent along (no extra request)."""
         players = list(players)

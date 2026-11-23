@@ -354,12 +354,32 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert names() == ["Old", "New2", "New"]          # toggled: oldest first
     app.sort_by("gamertag")
     assert names() == ["New", "New2", "Old"]          # A-Z
-    d.add_tag([new_id], "crew")
+    assert d.get_setting("player_sort") == "gamertag:0"  # remembered for the next start
+    d.add_tag([new_id], "mates")
     app.reload()
-    assert [app.tree.set(i, "tags") for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New2"] == ["crew"]
-    app.search.set("crew")                              # searching finds tags
+    assert [app.tree.set(i, "tags") for i in app.tree.get_children() if app.tree.set(i, "gamertag") == "New2"] == ["mates"]
+    app.search.set("mates")                             # searching finds tags
     assert names() == ["New2"]
     app.search.set("")
+    for view, row in (("compact", 46), ("rows", 34), ("cards", 66)):   # list views, remembered
+        app.set_list_view(view)
+        root.update()
+        assert app.tree.ROW == row and d.get_setting("list_view") == view and names() == ["New", "New2", "Old"]
+        assert app._row_picture("", False) == "" and (app.VIEW_PICTURE[view] == 0) == (view == "rows")
+    app.show_bars(False)                                 # hide search and sort; Ctrl+F brings them back
+    assert not app.search_box.winfo_ismapped() and d.get_setting("show_bars") == "0"
+    app.show_bars(True)
+    root.update()
+    assert app.bars[1].winfo_manager() == "pack" and d.get_setting("show_bars") == "1"
+
+    d.add_tag([new_id], "crew")                         # crewmates are hidden (the default), shown on a click
+    app.reload()
+    assert "New2" not in names() and app.crew_btn.cget("text") == "Crew hidden"
+    app.toggle_crew()
+    assert "New2" in names() and app.crew_btn.cget("text") == "Crew shown" and d.get_setting("hide_crew") == "0"
+    app.toggle_crew()
+    d.remove_tag([new_id], "crew")
+    app.reload()
     # spinner: runs while a job is busy, stops when the last one finishes
     app._set_busy("sync", True)
     app._set_busy("live", True)
@@ -371,27 +391,34 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     # Encounters view: a summary row per selected player plus the recorded encounters
     app.tree.selection_set(app.tree.get_children())
     app.encounters_dialog()
-    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    dlg = app.pages[app.page_now]                        # opened as a tab
     assert len(dlg.summary_tv.get_children()) == 3 and len(dlg.log_tv.get_children()) == 3
     dlg.destroy()
-    # dialogs must open centred over the app window (not at the screen's top-left) and must never grab input
+    # questions open as a tab inside the app window (no separate window) and never grab input
     seen = {}
 
     def fake_wait(win):
         win.update()
-        seen["geo"] = (win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height())
+        seen["inside"] = win.winfo_toplevel() is root and app.page_now == win.key and win.winfo_ismapped()
         seen["grab"] = root.grab_current()
         win.destroy()
     app.root.wait_window = fake_wait
     root.deiconify()
-    root.geometry("820x520+120+90")
+    root.geometry("1100x520+120+90")
     root.update()
     app.tree.selection_set(app.tree.get_children()[0])
     app.tag_selected()
-    rx, ry, rw, rh = root.winfo_rootx(), root.winfo_rooty(), root.winfo_width(), root.winfo_height()
-    x, y, w, h = seen["geo"]
-    assert rx <= x and ry <= y and x + w <= rx + rw + 20 and y + h <= ry + rh + 20, (seen, (rx, ry, rw, rh))
+    assert seen["inside"] and app.page_now == "players"                   # answered: back to the players
     assert seen["grab"] is None
+    # yes/no questions are cards inside the window that wait for the answer (no message boxes)
+    root.after(50, lambda: app.question.answer(True))
+    assert app.ask_yes("Remove account", "Sure?") is True and app.question is None
+    root.after(50, lambda: app.question.event_generate("<Escape>"))
+    assert app.ask_yes("Remove account", "Sure?") is False
+    root.after(50, lambda: app.question.destroy())                       # closed some other way: no
+    assert app.ask_yes("Remove account", "Sure?") is False
+    root.after(50, lambda: app.question.answer("update"))
+    assert app._question("Update", "v2", [("Later", None, "soft"), ("Update now", "update", "accent")]) == "update"
     app.refresh_now = lambda *a, **k: None            # no network in tests
     app.tree.selection_set(app.tree.get_children()[0])
     app.acct_var.set("Main")
@@ -450,7 +477,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._on_twitch_link(by["Old"], None, "Twitch has no channel named 'x'.")  # a failed lookup changes nothing
     assert app.status_error and d.twitch_links([by["Old"]])[0]["twitch_id"] == "100200300"
     app.twitch_setup_dialog()                                                  # setup window: builds, reports, saves
-    setup = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    setup = app.pages[app.page_now]                        # opened as a tab
     assert "Not set up yet" in setup.state_var.get()
     app._on_twitch_setup("cid", "sec", "Twitch rejected the client ID or secret.")
     assert "Not saved" in setup.state_var.get() and not app.tcreds.configured()
@@ -472,10 +499,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         root.update()
         _t.sleep(0.05)
     assert "livecheck" not in app.busy
-    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    dlg = app.pages[app.page_now]                        # opened as a tab
     values = dlg.results_tv.item(dlg.results_tv.get_children()[0], "values")
     assert values[0] == "New" and "LIVE on Twitch" in values[2] and "9 viewers" in values[2]
     assert values[3] == "Quiet_One: offline"                         # Twitch column for a linked, offline player
+    for label, row in (("Compact", 42), ("Rows", 28), ("Cards", 76)):    # Live now has the three views too
+        dlg.set_view(label)
+        root.update()
+        assert dlg.results_tv.row == row and d.get_setting("live_view") == label.lower()
     rows = {dlg.results_tv.item(i, "values")[0]: dlg.results_tv.item(i, "values") for i in dlg.results_tv.get_children()}
     assert rows["Old"][3] == "LIVE: Supermarket Together - Evening Stream (7 viewers)"
     icons = {app.tree.set(i, "gamertag"): app.tree.item(i, "image") for i in app.tree.get_children()}
@@ -495,7 +526,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     while "livecheck" in app.busy and _t.time() < end:
         root.update()
         _t.sleep(0.05)
-    dlg = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    dlg = app.pages[app.page_now]                        # opened as a tab
     shown = [dlg.results_tv.item(i, "values") for i in dlg.results_tv.get_children()]
     assert [v[0] for v in shown] == ["Old"] and shown[0][3].startswith("LIVE:")   # live on Twitch only
     assert sorted(asked) == ["1", "2", "3"] and "1 player(s) live" in app.status.get()
@@ -527,11 +558,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.selection_set(str(by["Old"]))
     items = {label: enabled for label, cmd, enabled in app._row_menu_items() if label}
     assert items["Add Xbox friend"] and items["Xbox messages..."] and items["Open Xbox profile"]
-    opened_bar = []
-    monkeypatch.setattr(social, "open_gamebar_social", lambda: opened_bar.append(1) or True)
-    assert items["Invite / join in Game Bar"]
-    app.invite_or_join()                                                     # Game Bar + gamertag on the clipboard
-    assert opened_bar and root.clipboard_get() == "Old" and "Invite to game" in app.status.get()
+    assert not any("Invite" in label or "Join" in label for label in items)   # Xbox doesn't allow it from here
     signin = []
     monkeypatch.setattr(social, "open_xbox_app", lambda: signin.append(1) or True)
     from brpw import xboxui
@@ -550,10 +577,10 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()
     items = {label for label, cmd, enabled in app._row_menu_items() if label}
     assert "Remove Xbox friend..." in items                                  # now in your list
-    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: False)
+    app.ask_yes = lambda *a, **k: False
     app.remove_friend_selected()                                              # declined: nothing sent
     assert sent[-1][0] == "PUT"
-    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: True)
+    app.ask_yes = lambda *a, **k: True
     app.remove_friend_selected()
     settle()
     assert sent[-1] == ("DELETE", "friends/1", None)
@@ -571,23 +598,56 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     assert sent[-1] == ("GET", "messages/1", None)                         # reloaded after sending
     assert msg.winfo_exists() and msg.box.get("1.0", "end").strip() == "" and "sent to Old" in app.status.get()
     msg.destroy()
-    fr = app.friends_dialog()
+    fr = app.friends_dialog()                                               # Friends & messages, Friends tab
     settle()
-    assert fr.rows() == [("New", "●  Sea of Thieves", "")] and "1 online" in fr.info.get()
-    assert fr.friends_tv.item(fr.friends_tv.get_children()[0], "text") == "ONLINE — 1"     # sections
-    fr.select("New")
+    assert fr.rows() == [("ONLINE — 1",), ("New", "")] and "1 online" in fr.info.get()
+    fr.open("New")                                                           # a friend: the chat opens on the right
     root.update()
-    assert fr.friend_btn.cget("text") == "Remove friend"
+    settle()
+    assert fr.panel is not None and sent[-1] == ("GET", "messages/2", None)
     fr.entry.focus_force()
     root.update()
     fr.query.set("salty")                                                    # no friend matches...
     fr.search()                                                              # ...so Enter searches Xbox
     settle()
     assert sent[-1] == ("GET", "search/salty", None)
-    texts = [fr.friends_tv.item(i, "text").strip() for i in fr.friends_tv.get_children()]
-    assert texts == ['ON XBOX — "salty"', "nobody else found"]              # a friend found again isn't repeated
+    assert fr.rows() == [('ON XBOX — "salty"',), ("nobody else found",)]    # a friend found again isn't repeated
     assert d.friend_relations("Main") == {"2": "Friend"}                     # the Friend highlight is refreshed too
+    fr.show_tab("requests")                                                  # an OpenXBL key: no friend requests
+    assert "signed in with Microsoft" in fr.info.get()
     fr.destroy()
+    # friend requests: accept or ignore from a card on the right
+    reqs = {"received": [
+        {"xuid": "7", "gamertag": "Kraken", "state": "Online", "text": "Sea of Thieves", "favorite": False,
+         "relation": "Wants to be friends", "last_seen": None, "pic": "", "at": _t.time() - 300},
+        {"xuid": "8", "gamertag": "Brine", "state": "Offline", "text": "", "favorite": False,
+         "relation": "Wants to be friends", "last_seen": None, "pic": "", "at": _t.time() - 900}], "sent": []}
+    answered = []
+    monkeypatch.setattr(social, "friend_requests", lambda key: {s: list(v) for s, v in reqs.items()})
+    monkeypatch.setattr(social, "accept_friend", lambda key, x: answered.append(("accept", x)))
+    monkeypatch.setattr(social, "ignore_friend", lambda key, x: answered.append(("ignore", x)))
+    rq = app.requests_dialog()
+    settle()
+    assert [r[0] for r in rq.rows()] == ["WANT TO BE YOUR FRIEND — 2", "Kraken", "Brine"]
+    assert app.msg_btn.cget("text") == "Friends & messages (2)" and "2 waiting" in rq.info.get()
+    rq.open("Kraken")
+    root.update()
+    assert answered == [] and rq.panel.accept_btn.winfo_exists()             # nothing happens until a click
+    reqs["received"] = reqs["received"][1:]
+    rq.panel.accept_btn.invoke()
+    settle()
+    assert answered == [("accept", "7")] and "You and Kraken are now friends" in app.status.get()
+    assert rq.panel is not None and hasattr(rq.panel, "texts")               # accepted: now the chat with Kraken
+    assert [r[0] for r in rq.rows()] == ["WANT TO BE YOUR FRIEND — 1", "Brine"]
+    assert app.msg_btn.cget("text") == "Friends & messages (1)"
+    rq.open("Brine")
+    root.update()
+    reqs["received"] = []
+    rq.panel.ignore_btn.invoke()
+    settle()
+    assert answered[-1] == ("ignore", "8") and rq.panel is None
+    assert rq.rows() == [("No friend requests right now",)] and app.msg_btn.cget("text") == "Friends & messages"
+    rq.destroy()
     # Messages: every conversation (newest first, unread marked), the chat opens on the right
     monkeypatch.setattr(social, "inbox", lambda key: {"groups": 1, "chats": [
         {"xuid": "1", "gamertag": "Old", "state": "Online", "text": "", "preview": "gg last night", "mine": False,
@@ -596,7 +656,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
          "at": _t.time() - 86400 * 3, "unread": False},
         {"xuid": "4", "gamertag": "Loud", "state": "Offline", "text": "", "preview": "spam", "mine": False,
          "at": _t.time() - 86400 * 4, "unread": True, "muted": True}]})
-    ib = app.inbox_dialog()
+    ib = app.inbox_dialog(tab="chats")
     settle()
     assert [r[0] for r in ib.rows()] == ["Old", "New2", "Loud  · muted"]
     assert "1 unread" in ib.info.get() and "1 group" in ib.info.get()           # the muted chat isn't counted
@@ -604,12 +664,27 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     root.update()
     settle()
     assert ib.panel is not None and ib.panel.texts() == ["gg last night", "Message deleted"] and sent[-1] == ("GET", "messages/1", None)
+    root.geometry("600x520")                                                 # a slim window
+    root.update()
+    app._resized()
+    assert app.tabstrip.label("streams") == "Streams" and not app.status_extras[0].winfo_ismapped()
+    assert [str(p) for p in ib.panes.panes()] == [str(ib.panel.master)] and ib.panel.back is not None  # chat only
+    ib.show_list()
+    root.update()
+    assert ib.panel is None and len(ib.panes.panes()) == 1                     # Back: the list only
+    root.geometry("1100x520")                                                # wide again: both, full names
+    root.update()
+    app._resized()
+    assert len(ib.panes.panes()) == 2 and app.tabstrip.label("streams") == "Live streams"
+    ib.open("Old")
+    root.update()
+    settle()
     ib.entry.focus_force()
     root.update()
     ib.query.set("ne")                                                       # filters by name
     assert [r[0] for r in ib.rows()] == ["New2"]
     card = app._delete_chat(ib.panel, "Old", "c1", "5")                    # asks inside the Messages window
-    assert card.winfo_toplevel() == ib and "Delete the chat with Old" in card.text
+    assert str(card).startswith(str(ib)) and "Delete the chat with Old" in card.text
     card.yes()                                                               # an OpenXBL key: Xbox can't be asked
     settle()
     assert "Could not delete the chat with Old" in app.status.get() and "signed in with Microsoft" in app.status.get()
@@ -635,7 +710,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     msg_round()
     toast = app.toast
     assert toast.winfo_exists() and "Old" in toast.title_text and toast.body_text == "you up?"
-    assert app.msg_btn.cget("text") == "Messages (1)"
+    assert app.msg_btn.cget("text") == "Friends & messages (1)"
     msg_round()                                                              # the same message: no second pop-up
     assert app.toast is toast and len(asked_unread) == 2
     toast.click()                                                            # opens Messages at that chat
@@ -643,8 +718,11 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     root.update()
     settle()
     assert not toast.winfo_exists() and app.inbox_win.panel is not None
-    assert app.msg_btn.cget("text") == "Messages"                            # read here: the count is gone
+    assert app.msg_btn.cget("text") == "Friends & messages"                  # read here: the count is gone
     assert app.inbox_dialog() is app.inbox_win                               # one Messages window
+    app.inbox_win.destroy()
+    fr = app._open_social()                                                  # the tab opens on Friends
+    assert fr.tabs.current == "friends"
     app.inbox_win.destroy()
     app.msg_popups.set(False)
     app.set_message_popups()
@@ -671,7 +749,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         _t.sleep(0.02)
     assert app.xkey.active() == "Dolly" and app.xkey.get() == MARK + "2535400000000777"
     assert "Dolly" in app.acct_box.cget("values")
-    monkeypatch.setattr(ui.messagebox, "askyesno", lambda *a, **k: True)
+    app.ask_yes = lambda *a, **k: True
     app.remove_account()
     assert removed == ["2535400000000777"] and "Dolly" not in app.xkey.names()
     app.xkey.set_active("Main")
@@ -695,16 +773,27 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     sw = app.sot_win
     sw.geometry("900x320")                                             # small window: buttons must stay visible
     root.update()
-    btn = [w for f in sw.winfo_children() for w in f.winfo_children()
-           if isinstance(w, ttk.Button) and w.cget("text") == "Find on SOTREP"][0]
+    btn = sw.rep_btn
+    assert btn.cget("text") == "Find on SOTREP"
     assert btn.winfo_ismapped() and btn.winfo_rooty() + btn.winfo_height() <= sw.winfo_rooty() + sw.winfo_height()
     count = lambda: len(sw.streams_tv.get_children())
     vals = [sw.streams_tv.item(i, "values") for i in sw.streams_tv.get_children()]
     assert [v[1] for v in vals] == ["Big_One", "Example_Streamer", "Unlinkedpirate", "Stranger"]
-    assert vals[1][0] == "linked: Old" and vals[2][0] == "same name: Unlinked Pirate"
+    assert vals[1][0] == "linked: Old" and vals[2][0] == ""                 # no name guessing
     assert vals[1][3] == "1h 01m" and vals[0][6] == "Hourglass"
     sw.filter_var.set("strang")
     assert count() == 1
+    sw.toggle_filters()                                                # hide the filter rows: the filter stays on
+    root.update()
+    assert count() == 1 and d.get_setting("stream_filters") == "0"
+    sw.toggle_filters()
+    assert d.get_setting("stream_filters") == "1"
+    sw.set_view("Compact")                                             # three views, remembered
+    assert sw.streams_tv.row == 38 and d.get_setting("stream_view") == "compact" and count() == 1
+    sw.set_view("Rows")
+    assert sw.streams_tv.row == 28 and sw.streams_tv.gap == 0 and d.get_setting("stream_view") == "rows"
+    sw.set_view("Cards")
+    assert sw.streams_tv.row == 78
     sw.filter_var.set("hourglass")                                     # search also looks at tags
     assert count() == 1
     sw.filter_var.set("")
@@ -719,7 +808,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     sw.vmin.set("")
     sw.vmax.set("")
     sw.mine.set(True)
-    assert count() == 2
+    assert count() == 1
     sw.mine.set(False)
     sw.lang_var.set("en (2)")
     assert count() == 2
@@ -730,6 +819,11 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._on_sot_streams(streams, None)                                 # Refresh keeps the filters and sorting
     sw = app.sot_win
     assert sw.lang_var.get() == "en (2)" and count() == 2
+    sw.filter_var.set("x")
+    del app.sot_filters                                                # as after a restart: read back from disk
+    app._on_sot_streams(streams, None)
+    sw = app.sot_win
+    assert sw.lang_var.get() == "en (2)" and count() == 2 and sw.filter_var.get() == ""   # not the search text
     assert sw.streams_tv.item(sw.streams_tv.get_children()[0], "values")[1] == "Unlinkedpirate"
     sw.mine.set(True)
     sw.reset()                                                         # Reset table: no filters, most viewers first
@@ -738,39 +832,21 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app._on_sot_streams(streams, None)
     sw = app.sot_win
     assert count() == 4                                                # the reset is remembered
-    sw.streams_tv.selection_set(sw.streams_tv.get_children()[2])
-    root.update()
-    assert sw.player_var.get() == "Unlinked Pirate"                    # same-name stream pre-fills the player
-    sw.link()
-    unl = [r for r in d.list_accounts() if r["gamertag"] == "Unlinked Pirate"][0]
-    assert unl["twitch_id"] == "901" and sw.player_var.get() == ""   # Player box cleared after linking
     opened.clear()
     sw.streams_tv.selection_set([i for i in sw.streams_tv.get_children()
                                  if sw.streams_tv.item(i, "values")[1] == "Unlinkedpirate"])
     sw.find_on_sotrep()
     assert opened == ["https://www.sotrep.com/search/twitch-unlinkedpirate"]
-    # a gamertag that is not in the history: looked up on Xbox first, added (without an encounter) and linked
-    monkeypatch.setattr(ui, "find_gamertag", lambda key, tag: (Player("Far Away Pirate", "2535400000000001"), [])
-                        if tag.casefold() == "far away pirate" else (None, ["Far Away Pirat3"]))
-    stranger = [i for i in sw.streams_tv.get_children() if sw.streams_tv.item(i, "values")[1] == "Stranger"]
-    sw.streams_tv.selection_set(stranger)
-    sw.player_var.set("far away pirat")
-    sw.link()
-    end = _t.time() + 5
-    while "xboxlookup" in app.busy and _t.time() < end:
-        root.update()
-        _t.sleep(0.05)
-    assert app.status_error and "Similar: Far Away Pirat3" in app.status.get()
-    assert sw.player_var.get() == "far away pirat"                     # a failed lookup keeps what was typed
-    sw.player_var.set("far away pirate")
-    sw.link()
-    end = _t.time() + 5
-    while "xboxlookup" in app.busy and _t.time() < end:
-        root.update()
-        _t.sleep(0.05)
-    far = [r for r in d.list_accounts() if r["xuid"] == "2535400000000001"][0]
-    assert far["gamertag"] == "Far Away Pirate" and far["twitch_id"] == "902" and far["encounters"] == 0
-    assert sw.player_var.get() == ""                                  # cleared after linking
+    app._show_page("players")
+    real_streams = app.sot_streams
+    app.sot_streams = lambda: pytest.fail("switching tabs must not ask Twitch again")
+    app._tab_clicked("streams")                                        # the page is kept: shown as it was
+    assert app.page_now == "streams" and app.sot_win is sw and count() == 4
+    sw.destroy()                                                       # even rebuilt, it uses the last list
+    app._tab_clicked("streams")
+    assert app.page_now == "streams" and len(app.sot_win.streams_tv.get_children()) == 4
+    app.sot_streams = real_streams
+    sw = app.sot_win
     sw.destroy()
     # links made earlier by the (now removed) auto-matcher keep a small mark
     d.unlink_twitch([by["Old"]])

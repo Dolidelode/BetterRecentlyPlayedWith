@@ -4,7 +4,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from . import sotrep
 from .providers import ProviderError
@@ -100,7 +100,7 @@ class SharedListMixin:
         if win is not None and win.winfo_exists():
             win.lift()
             return win
-        win = tk.Toplevel(self.root)
+        win = self._page("shared", "Shared Twitch list", fresh=True)
         self._shared_win = win
         win.title("Shared Twitch list")
         win.configure(bg=self.pal["bg"])
@@ -178,7 +178,7 @@ class SharedListMixin:
         rows = self.db.links_to_share()
         if client is None or not rows:
             return self.set_status("Nothing to send: all your links are already in the master list or sent.")
-        if confirm and not messagebox.askyesno("Send links", (
+        if confirm and not self.ask_yes("Send links", (
                 f"Send {len(rows)} link(s) to the list owner for review?\n\n"
                 "Sent: gamertag, XUID, Twitch channel, your optional name and a random ID of this copy."),
                 parent=getattr(self, "_shared_win", None) or self.root):
@@ -201,7 +201,7 @@ class SharedListMixin:
         rows = new + renamed
         if client is None or not rows:
             return
-        if not messagebox.askyesno("Publish", (
+        if not self.ask_yes("Publish", (
                 f"Add {len(new)} of your own link(s) to the master list"
                 + (f" and update {len(renamed)} renamed player(s) / channel(s)" if renamed else "") + "?"),
                 parent=getattr(self, "_shared_win", None) or self.root):
@@ -221,7 +221,8 @@ class SharedListMixin:
         found = list(self.db.shared_entry(xuids))
         if client is None or not found:
             return self.set_status("None of the selected players are in the master list.")
-        if not messagebox.askyesno("Master list", f"Remove {len(found)} player(s) from the master list for everyone?"):
+        if not self.ask_yes("Master list", f"Remove {len(found)} player(s) from the master list for everyone?",
+                            yes="Remove", danger=True):
             return
 
         def done(_, err):
@@ -259,7 +260,7 @@ class SharedListMixin:
         client = self._shared_client(admin=True)
         if client is None:
             return self.set_status("Only the list owner can review suggestions (Owner setup...).", error=True)
-        win = tk.Toplevel(self.root)
+        win = self._page("review", "Review suggestions", fresh=True)
         win.title("Review suggestions")
         win.configure(bg=self.pal["bg"])
         ttk.Label(win, style="Hint.TLabel", wraplength=1000, justify="left", text=(
@@ -347,7 +348,7 @@ class SharedListMixin:
             if not sel:
                 return state.set("Select a suggestion from the sender to block.")
             senders = {s["submitter"]: s["submitter_name"] or s["submitter"][:8] for s in sel}
-            if not messagebox.askyesno("Block sender", "Block " + ", ".join(senders.values()) +
+            if not self.ask_yes("Block sender", "Block " + ", ".join(senders.values()) +
                                        "?\nAll their waiting suggestions are rejected and new ones refused.",
                                        parent=win):
                 return
@@ -408,8 +409,8 @@ class SharedListMixin:
 
     def shared_setup_dialog(self):
         """Only needed by the list owner (or someone running their own list)."""
-        win = tk.Toplevel(self.root)
-        win.title("Shared list: owner setup")
+        win = self._page("shared_setup", "Shared list setup", fresh=True)
+        win.title("Shared list setup")
         win.configure(bg=self.pal["bg"])
         win.transient(self.root)
         ttk.Label(win, style="Hint.TLabel", wraplength=540, justify="left", text=(

@@ -106,3 +106,69 @@ def test_player_cards_select_like_a_list_and_find_the_twitch_pill(root):
     assert cards.get_children() == ("2", "3") and cards.selection() == ("2",)
     cards.destroy()
     root.withdraw()
+
+
+def test_twitch_pictures_any_format_resized(root, tmp_path):
+    import io
+    from PIL import Image
+    raw = "https://static-cdn.jtvnw.net/jtv_user_pictures/abc-profile_image-300x300.jpeg"
+    assert chat_ui.twitch_picture_url(raw) == \
+        "https://static-cdn.jtvnw.net/jtv_user_pictures/abc-profile_image-70x70.jpeg"
+    for bad in ("http://static-cdn.jtvnw.net/jtv_user_pictures/a.png", "https://static-cdn.jtvnw.net/other/a.png",
+                "https://evil.example/jtv_user_pictures/a.png"):
+        assert chat_ui.twitch_picture_url(bad) == ""
+    buf = io.BytesIO()
+    Image.new("RGB", (70, 70), (200, 0, 0)).save(buf, "JPEG")                # Tk can't read JPEG by itself
+    posted, fetched = [], []
+    pics = chat_ui.Pictures(tmp_path, posted.append, fetch=lambda u: fetched.append(u) or buf.getvalue())
+    assert pics.get(raw, size=40) is None
+    pics.pool.shutdown(wait=True)
+    for fn in posted:
+        fn()
+    img = pics.get(raw, size=40)
+    assert img is not None and img.width() == 40 and fetched == [chat_ui.twitch_picture_url(raw)]
+    assert img.transparency_get(0, 0) and not img.transparency_get(20, 20)    # round like the Xbox pictures
+
+
+def test_cards_unfold_on_click_and_spots_run_their_action(root):
+    pal = palette(1)
+    hits = []
+
+    def draw(c, iid, values, tags, x1, y1, x2, y2, sel, hov):
+        if lst.expanded == iid:
+            lst.spot(iid, (x1, y1, x1 + 50, y1 + 50), lambda: hits.append(iid))
+    lst = chat_ui.CardList(root, pal, draw, row=60, big=200)
+    root.deiconify()
+    root.geometry("700x600")
+    lst.pack(fill="both", expand=True)
+    a, b = lst.insert("", "end", values=("a",)), lst.insert("", "end", values=("b",))
+    root.update()
+    lst.redraw()
+    click = lambda x, y: lst._click(type("E", (), {"x": x, "y": y, "state": 0})())
+    click(200, lst.tops[a] + 30)
+    assert lst.expanded == a and lst.selection() == (a,) and lst.height(a) == 200
+    assert lst.identify_row(lst.tops[b] + 30) == b and lst.tops[b] == lst.tops[a] + 200 + lst.gap
+    lst.redraw()
+    click(20, lst.tops[a] + 20)                                              # a button inside the open card
+    assert hits == [a] and lst.expanded == a
+    click(200, lst.tops[a] + 100)                                            # click it again: folds
+    assert lst.expanded is None
+    lst.destroy()
+    root.withdraw()
+
+
+def test_stream_previews_only_from_twitch(root):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 360), (0, 90, 200)).save(buf, "JPEG")
+    posted = []
+    pv = chat_ui.Previews(posted.append, fetch=lambda u: buf.getvalue())
+    url = "https://static-cdn.jtvnw.net/previews-ttv/live_user_salty-320x180.jpg"
+    assert pv.get("https://evil.example/previews-ttv/x.jpg") is None and not posted
+    assert pv.get(url, size=(192, 108)) is None
+    pv.pool.shutdown(wait=True)
+    for fn in posted:
+        fn()
+    img = pv.get(url, size=(192, 108))
+    assert img is not None and (img.width(), img.height()) == (192, 108)
