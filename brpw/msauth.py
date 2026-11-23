@@ -30,7 +30,10 @@ AUTHORIZE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authori
 TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 USER_AUTH_URL = "https://user.auth.xboxlive.com/user/authenticate"
 XSTS_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
-SCOPE = "XboxLive.signin offline_access"
+REFRESH_SCOPE = "XboxLive.signin offline_access"
+# A new sign-in also asks for the email (openid email), so the Xbox app's account picker can be answered by itself
+# (xboxui.py). Refreshes keep the old scope: asking for more there fails for sign-ins made before (AADSTS70000).
+SCOPE = REFRESH_SCOPE + " openid email"
 REDIRECT_PATH = "/auth/callback"
 PORTS = (8080, 8081, 8082)      # Microsoft ignores the port of a http://localhost redirect for desktop apps
 MARK = "msa:"                   # an account "key" starting with this is a Microsoft sign-in, followed by the XUID
@@ -145,11 +148,26 @@ def browser_sign_in(client_id: str = CLIENT_ID, open_url: Callable = webbrowser.
 def refresh_ms_token(refresh_token: str, client_id: str = CLIENT_ID, http=http_json) -> dict:
     try:
         return http(TOKEN_URL, {"client_id": client_id, "grant_type": "refresh_token",
-                                "refresh_token": refresh_token, "scope": SCOPE}, None, True)
+                                "refresh_token": refresh_token, "scope": REFRESH_SCOPE}, None, True)
     except ProviderError as e:
         if getattr(e, "code", 0) in (400, 401):
             raise ProviderError("The Microsoft sign-in expired or was revoked. Sign in again.", reauth=True)
         raise
+
+
+def email_from(ms: dict) -> str:
+    """The account's email from the id_token of a sign-in (straight from Microsoft's token endpoint over HTTPS, so its
+    signature isn't checked). Empty when there is none."""
+    try:
+        part = str(ms.get("id_token") or "").split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except (IndexError, ValueError, TypeError):
+        return ""
+    for k in ("email", "preferred_username"):
+        v = str(claims.get(k) or "").strip()
+        if "@" in v:
+            return v
+    return ""
 
 
 def xbox_token(ms_access_token: str, http=http_json) -> dict:
@@ -204,6 +222,15 @@ class MsAccounts:
         with self.lock:
             return self._load()["accounts"].get(xuid, {}).get("gamertag", "")
 
+    def email(self, xuid: str) -> str:
+        """The account's email when it was signed in with the email permission, else ""."""
+        with self.lock:
+            blob = self._load()["accounts"].get(xuid, {}).get("email")
+        try:
+            return self.unprotect(blob) if blob else ""
+        except (OSError, ValueError):
+            return ""
+
     def add_from_ms_token(self, ms: dict) -> Tuple[str, str]:
         """Store a fresh sign-in (from browser_sign_in). Returns (xuid, gamertag)."""
         tok = xbox_token(ms["access_token"], self.http)
@@ -211,8 +238,11 @@ class MsAccounts:
             raise ProviderError("Xbox did not return an account for this sign-in.")
         with self.lock:
             d = self._load()
-            d["accounts"][tok["xuid"]] = {"gamertag": tok["gamertag"],
-                                         "refresh": self.protect(ms["refresh_token"]), "added": int(time.time())}
+            acc = {"gamertag": tok["gamertag"], "refresh": self.protect(ms["refresh_token"]), "added": int(time.time())}
+            email = email_from(ms)
+            if email:
+                acc["email"] = self.protect(email)            # only on this PC, like the refresh token
+            d["accounts"][tok["xuid"]] = acc
             self._save(d)
             self.cache[tok["xuid"]] = tok
         return tok["xuid"], tok["gamertag"]

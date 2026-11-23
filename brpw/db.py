@@ -17,6 +17,7 @@ class Player:
     gamertag: str
     xuid: Optional[str] = None
     observed_at: Optional[int] = None  # only set when the source really provides a timestamp
+    pic: Optional[str] = None          # profile picture address, when the source sends one (Xbox does)
 
 
 @dataclass
@@ -147,7 +148,14 @@ def _m11(c: sqlite3.Connection) -> None:
         PRIMARY KEY(xuid, twitch_id))""")
 
 
-MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10, _m11]  # index i migrates user_version i -> i+1
+def _m12(c):
+    # Per player from Xbox: the profile picture address and Sea of Thieves minutes played (Xbox's MinutesPlayed
+    # statistic; NULL with stats_at set = Xbox didn't share it). Keyed by XUID, refreshed now and then.
+    c.execute("""CREATE TABLE xbox_profiles(
+        xuid TEXT PRIMARY KEY, pic TEXT, pic_at INTEGER, minutes INTEGER, stats_at INTEGER)""")
+
+
+MIGRATIONS = [_m1, _m2, _m3, _m4, _m5, _m6, _m7, _m8, _m9, _m10, _m11, _m12]  # migrates user_version i -> i+1
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -253,6 +261,15 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
     # ---- merging observations ----
+    def merge_players_with_pictures(self, players: List[Player], *args, **kw):
+        """merge_players, then keep the profile pictures the source sent along (no extra request)."""
+        players = list(players)
+        res = self.merge_players(players, *args, **kw)
+        pics = {p.xuid: p.pic for p in players if p.xuid and p.pic}
+        if pics:
+            self.save_pictures(pics)
+        return res
+
     def merge_players(self, players: Iterable[Player], source: str, live: bool,
                       now: Optional[int] = None, owner: str = "") -> MergeResult:
         """Merge one observed list atomically.
@@ -344,12 +361,13 @@ class Database:
                       tl.twitch_id AS twitch_id, tl.login AS twitch_login, tl.display_name AS twitch_name,
                       ts.live AS twitch_live, ts.viewers AS twitch_viewers, ts.game AS twitch_game,
                       ts.title AS twitch_title, ts.checked_at AS twitch_checked, tl.source AS twitch_source,
-                      tn.reason AS twitch_never
+                      tn.reason AS twitch_never, xp.pic AS pic, xp.minutes AS sot_minutes, xp.stats_at AS stats_at
                FROM accounts a
                LEFT JOIN friends f ON f.xuid=a.xuid AND f.owner=?
                LEFT JOIN twitch_links tl ON tl.account_id=a.id
                LEFT JOIN twitch_status ts ON ts.account_id=a.id
-               LEFT JOIN twitch_never tn ON tn.account_id=a.id"""
+               LEFT JOIN twitch_never tn ON tn.account_id=a.id
+               LEFT JOIN xbox_profiles xp ON xp.xuid=a.xuid"""
         args: list = [owner, owner, owner]      # in_latest, pos, friends join (textual order)
         if search.strip():
             like = f"%{search.strip().casefold()}%"
@@ -359,6 +377,38 @@ class Database:
         q += " ORDER BY a.last_seen DESC, pos IS NULL, pos ASC, a.id DESC"
         with self.lock:
             return self.conn.execute(q, args).fetchall()
+
+    # ---- Xbox profile pictures and hours played ----
+    def save_pictures(self, pics: dict, now: Optional[int] = None) -> None:
+        now = int(now or time.time())
+        with self.lock, self.conn:
+            for x, pic in pics.items():
+                self.conn.execute("""INSERT INTO xbox_profiles(xuid, pic, pic_at) VALUES(?,?,?)
+                    ON CONFLICT(xuid) DO UPDATE SET pic=excluded.pic, pic_at=excluded.pic_at""", (str(x), pic or None, now))
+
+    def save_minutes(self, asked: Iterable[str], minutes: dict, now: Optional[int] = None) -> None:
+        """minutes: xuid -> minutes for those Xbox answered; the other asked players get NULL (not shared)."""
+        now = int(now or time.time())
+        with self.lock, self.conn:
+            for x in asked:
+                m = minutes.get(str(x))
+                self.conn.execute("""INSERT INTO xbox_profiles(xuid, minutes, stats_at) VALUES(?,?,?)
+                    ON CONFLICT(xuid) DO UPDATE SET minutes=excluded.minutes, stats_at=excluded.stats_at""",
+                                  (str(x), int(m) if m is not None else None, now))
+
+    def profiles_due(self, xuids: Iterable[str], now: Optional[int] = None, pic_age: int = 7 * 86400,
+                     stats_age: int = 86400):
+        """(players needing a picture, players needing hours played) among xuids, oldest information first."""
+        now = int(now or time.time())
+        xs = [str(x) for x in dict.fromkeys(xuids) if x]
+        if not xs:
+            return [], []
+        with self.lock:
+            have = {r[0]: (r[1], r[2]) for r in self.conn.execute(
+                f"SELECT xuid, pic_at, stats_at FROM xbox_profiles WHERE xuid IN ({','.join('?' * len(xs))})", xs)}
+        pics = [x for x in xs if (have.get(x, (None, None))[0] or 0) < now - pic_age]
+        stats = [x for x in xs if (have.get(x, (None, None))[1] or 0) < now - stats_age]
+        return pics, stats
 
     def account_details(self, account_ids: List[int], owner: Optional[str] = "") -> List[sqlite3.Row]:
         """One summary row per account for the Encounters view (everything here comes from stored data)."""

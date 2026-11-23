@@ -63,14 +63,8 @@ class Keys:
 def test_stream_log_window(tmp_path, monkeypatch):
     import tkinter as tk
     from brpw import streamlog_ui as ui
-    for attempt in range(5):        # a second Tk in one process sometimes fails to find init.tcl on Windows
-        try:
-            root = tk.Tk()
-            break
-        except tk.TclError as e:
-            if attempt == 4:
-                pytest.skip(f"no display available: {e}")
-            time.sleep(0.2)
+    from conftest import new_root
+    root = new_root()
     root.withdraw()
     monkeypatch.setattr(ui, "keep_awake", lambda on: True)
     opened = []

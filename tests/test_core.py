@@ -323,10 +323,8 @@ def test_in_app_update_download_verify_install(tmp_path):
 def test_app_startup_shutdown(tmp_path, monkeypatch):
     import time
     from brpw import ui
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
+    from conftest import new_root
+    root = new_root()
     root.withdraw()
     d = Database(tmp_path / "p.db")
     d.set_setting("auto_update_check", "0")
@@ -535,9 +533,18 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.invite_or_join()                                                     # Game Bar + gamertag on the clipboard
     assert opened_bar and root.clipboard_get() == "Old" and "Invite to game" in app.status.get()
     signin = []
-    monkeypatch.setattr(social, "open_xbox_sign_in", lambda: signin.append(1) or True)
-    app.switch_game_bar()                                                    # Xbox sign-in screen + account copied
-    assert signin and root.clipboard_get() == app.xkey.active() and "Game Bar uses the same sign-in" in app.status.get()
+    monkeypatch.setattr(social, "open_xbox_app", lambda: signin.append(1) or True)
+    from brpw import xboxui
+    switched = []
+    monkeypatch.setattr(xboxui, "switch_account", lambda name, email="": switched.append((name, email)) or xboxui.PICKER)
+    app.switch_game_bar()                                     # Xbox app opened, signed out by its menu, picker shown
+    end = _t.time() + 5
+    while "xboxapp" in app.busy and _t.time() < end:
+        root.update()
+        _t.sleep(0.02)
+    root.update()
+    assert signin and switched == [(app.xkey.active(), "")] and root.clipboard_get() == app.xkey.active()
+    assert "Pick Main in Microsoft's sign-in window" in app.status.get()
     app.add_friend_selected()
     settle()
     assert sent[-1] == ("PUT", "friends/1", None) and "Added Old" in app.status.get()
@@ -553,8 +560,10 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     msg = app.message_dialog("Old", "1")
     settle()
     assert sent[-1] == ("GET", "messages/1", None)                         # the history with that player
-    assert msg.texts() == ["gg last night"]                                 # deleted messages are left out
+    assert msg.texts() == ["gg last night", "Message deleted"]              # a deleted message keeps its place
     assert "1 message(s)" in msg.info.get()
+    msg.sotrep_btn.invoke()                                                  # SOTREP from the chat
+    assert opened[-1] == sotrep.profile_url("Old")
     msg.box.insert("1.0", "Ahoy! Fancy a voyage?")
     msg.send()
     settle()
@@ -584,18 +593,26 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
         {"xuid": "1", "gamertag": "Old", "state": "Online", "text": "", "preview": "gg last night", "mine": False,
          "at": _t.time() - 60, "unread": True},
         {"xuid": "3", "gamertag": "New2", "state": "Offline", "text": "", "preview": "cya", "mine": True,
-         "at": _t.time() - 86400 * 3, "unread": False}]})
+         "at": _t.time() - 86400 * 3, "unread": False},
+        {"xuid": "4", "gamertag": "Loud", "state": "Offline", "text": "", "preview": "spam", "mine": False,
+         "at": _t.time() - 86400 * 4, "unread": True, "muted": True}]})
     ib = app.inbox_dialog()
     settle()
-    assert [r[0] for r in ib.rows()] == ["Old", "New2"] and "1 unread" in ib.info.get() and "1 group" in ib.info.get()
+    assert [r[0] for r in ib.rows()] == ["Old", "New2", "Loud  · muted"]
+    assert "1 unread" in ib.info.get() and "1 group" in ib.info.get()           # the muted chat isn't counted
     ib.open("Old")
     root.update()
     settle()
-    assert ib.panel is not None and ib.panel.texts() == ["gg last night"] and sent[-1] == ("GET", "messages/1", None)
+    assert ib.panel is not None and ib.panel.texts() == ["gg last night", "Message deleted"] and sent[-1] == ("GET", "messages/1", None)
     ib.entry.focus_force()
     root.update()
     ib.query.set("ne")                                                       # filters by name
     assert [r[0] for r in ib.rows()] == ["New2"]
+    card = app._delete_chat(ib.panel, "Old", "c1", "5")                    # asks inside the Messages window
+    assert card.winfo_toplevel() == ib and "Delete the chat with Old" in card.text
+    card.yes()                                                               # an OpenXBL key: Xbox can't be asked
+    settle()
+    assert "Could not delete the chat with Old" in app.status.get() and "signed in with Microsoft" in app.status.get()
     ib.destroy()
     # new messages: one pop-up per new message and a count on Messages (Microsoft sign-in accounts only)
     from brpw.msauth import MARK as _MARK
@@ -760,13 +777,14 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     d.link_twitch(by["Old"], "100200300", "example_streamer", "Example_Streamer", source="auto")
     app.reload()
     assert app.tree.set(str(by["Old"]), "twitch") == "Example_Streamer ⚙"
-    # columns can be hidden from the header menu, and that is remembered
+    # card details can be shown or hidden (Show on cards), and that is remembered; the XUID starts hidden
+    assert "xuid" not in app.tree["displaycolumns"]
+    app.toggle_column("xuid")
+    assert "xuid" in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == ""
     app.toggle_column("xuid")
     assert "xuid" not in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == "xuid"
     app._apply_hidden_columns()
     assert "xuid" not in app.tree["displaycolumns"]
-    app.toggle_column("xuid")
-    assert "xuid" in app.tree["displaycolumns"]
     # Reset table: Xbox list order, no search, every column back at its normal width
     app.toggle_column("tags")
     app.sort_by("gamertag")
@@ -774,7 +792,7 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.tree.column("gamertag", width=400)
     app.reset_table()
     assert (app.sort_col, app.sort_desc, app.search.get()) == ("current", False, "")
-    assert "tags" in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == ""
+    assert "tags" in app.tree["displaycolumns"] and d.get_setting("hidden_columns") == "xuid"
     assert app.tree.column("gamertag", "width") < 400 and app.tree.get_children()   # stretch columns fit the window
     real_refresh, refreshed, game = app.refresh_now, [], [False]
     app.refresh_now = lambda manual=True: refreshed.append(manual)
@@ -1102,3 +1120,47 @@ def test_game_detection():
     from brpw.game import game_running, running_processes
     assert game_running({"explorer.exe", "sotgame.exe"}) and not game_running({"explorer.exe"})
     assert isinstance(running_processes(), set)
+
+
+def test_profile_pictures_and_hours_are_stored_per_player(tmp_path):
+    from brpw.ui import hours_text
+    T = 1_800_000_000
+    d = Database(tmp_path / "p.db")
+    d.merge_players([Player("Salty", "1"), Player("Kraken", "2"), Player("Nameonly")], "openxbl", True, now=100,
+                    owner="Main")
+    assert d.profiles_due(["1", "2"], now=T) == (["1", "2"], ["1", "2"])
+    d.save_pictures({"1": "https://images-eds-ssl.xboxlive.com/image?url=a"}, now=T)
+    d.save_minutes(["1", "2"], {"1": 215860}, now=T)                   # 2 didn't share it
+    rows = {r["gamertag"]: r for r in d.list_accounts()}
+    assert rows["Salty"]["pic"].startswith("https://") and rows["Salty"]["sot_minutes"] == 215860
+    assert rows["Kraken"]["sot_minutes"] is None and rows["Kraken"]["stats_at"] == T
+    assert rows["Nameonly"]["pic"] is None
+    assert d.profiles_due(["1", "2"], now=T + 1000) == (["2"], [])             # asked recently: not again
+    assert d.profiles_due(["1", "2"], now=T + 86400 * 8) == (["1", "2"], ["1", "2"])
+    assert hours_text(215860, T) == "3,597 h" and hours_text(None, T) == "private"
+    assert hours_text(None, None) == "" and hours_text(30, 1) == "30 min"
+
+
+def test_pictures_that_come_with_the_player_list_are_kept(tmp_path):
+    from brpw.providers import parse_openxbl
+    players = parse_openxbl({"content": {"people": [
+        {"xuid": "1", "gamertag": "Salty", "titleName": "Sea of Thieves", "timestamp": "2026-11-05T22:13:00Z",
+         "displayPicRaw": "https://images-eds-ssl.xboxlive.com/image?url=a"},
+        {"xuid": "2", "gamertag": "Plain", "titleName": "Sea of Thieves", "timestamp": "2026-11-05T22:13:00Z"}]}})
+    assert players[0].pic.startswith("https://") and players[1].pic is None
+    d = Database(tmp_path / "p.db")
+    d.merge_players_with_pictures(players, "openxbl", True, 100, owner="Main")
+    rows = {r["gamertag"]: r["pic"] for r in d.list_accounts()}
+    assert rows == {"Salty": "https://images-eds-ssl.xboxlive.com/image?url=a", "Plain": None}
+
+
+def test_your_own_account_picture_is_read_from_the_account_settings():
+    from brpw.providers import account_picture
+    payload = {"content": {"profileUsers": [{"id": "1", "settings": [
+        {"id": "Gamertag", "value": "Dolly"},
+        {"id": "GameDisplayPicRaw", "value": "https://images-eds-ssl.xboxlive.com/image?url=me"}]}]}}
+    asked = []
+    assert account_picture(" key ", http=lambda url, data, headers: asked.append(headers) or payload) == \
+        "https://images-eds-ssl.xboxlive.com/image?url=me"
+    assert asked == [{"X-Authorization": "key"}]
+    assert account_picture("k", http=lambda *a: {"content": {"profileUsers": [{"settings": []}]}}) == ""

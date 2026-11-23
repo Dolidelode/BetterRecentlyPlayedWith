@@ -30,7 +30,7 @@ class SyncService:
             now = int(time.time())
             try:
                 players = provider.fetch()
-                res = self.db.merge_players(players, provider.name, provider.live, now,
+                res = self.db.merge_players_with_pictures(players, provider.name, provider.live, now,
                                             owner=getattr(provider, "owner", "") or "")
             except ProviderError as e:
                 return SyncOutcome(False, str(e), reauth=e.reauth, finished_at=now)

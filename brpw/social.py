@@ -104,36 +104,47 @@ def parse_friend_list(payload, in_list: bool = True) -> List[dict]:
             "favorite": bool(p.get("isFavorite")),
             "relation": ("Friend" if mine and theirs else "You follow" if mine else "Follows you" if theirs
                          else "In your list" if in_list else "Not in your list"),
-            "last_seen": _iso_to_epoch(p.get("lastSeenDateTimeUtc"))})
+            "last_seen": _iso_to_epoch(p.get("lastSeenDateTimeUtc")), "pic": str(p.get("displayPicRaw") or "")})
     out.sort(key=lambda f: (f["state"].casefold() != "online", not f["favorite"], f["gamertag"].casefold()))
     return out
 
 
 def message_text(m: dict) -> str:
-    """The text of one Xbox message (contentPayload.content.parts[] of type "text")."""
+    """The text of one Xbox message: contentPayload.content.parts[] of type "text", plus links ("weblink")."""
     cp = (m.get("contentPayload") or {}).get("content")
     parts = cp.get("parts") if isinstance(cp, dict) else None
     if isinstance(parts, list):
-        return " ".join(str(p.get("text") or "") for p in parts if isinstance(p, dict)
-                        and p.get("contentType") == "text").strip() or "(not text: picture or other content)"
+        out = []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if p.get("contentType") == "text":
+                out.append(str(p.get("text") or ""))
+            elif p.get("contentType") == "weblink":
+                out.append(str(p.get("url") or p.get("text") or p.get("uri") or ""))
+        return " ".join(x for x in out if x).strip() or "(not text: picture or other content)"
     return str(cp) if isinstance(cp, str) else "(not text: picture or other content)"
 
 
 def parse_history(payload) -> dict:
-    """{"messages": [{"sender", "text", "at"}...] oldest first, "more": bool}. Shape seen for real:
-    content.messages[].contentPayload.content.parts[] with contentType "text"; deleted messages are left out."""
+    """{"messages": [{"sender", "text", "at", "id", "deleted"}...] oldest first, "more": bool, "conversation": id}.
+    Shape seen for real: content.messages[].contentPayload.content.parts[]. A message its sender deleted stays in
+    place with isDeleted and its text replaced by "Deleted" on Xbox's side (the original can't be fetched), so it is
+    kept as deleted=True with no text."""
     content = payload.get("content") if isinstance(payload, dict) else None
     msgs = content.get("messages") if isinstance(content, dict) else None
     if not isinstance(msgs, list):
         raise ProviderError("Unexpected message history from OpenXBL.")
     out = []
     for m in msgs:
-        if not isinstance(m, dict) or m.get("isDeleted"):
+        if not isinstance(m, dict):
             continue
-        out.append({"sender": str(m.get("sender") or ""), "text": message_text(m),
-                    "at": _iso_to_epoch(m.get("timestamp"))})
+        deleted = bool(m.get("isDeleted"))
+        out.append({"sender": str(m.get("sender") or ""), "text": "" if deleted else message_text(m),
+                    "at": _iso_to_epoch(m.get("timestamp")), "id": str(m.get("messageId") or ""), "deleted": deleted})
     out.sort(key=lambda m: m["at"] or 0)
-    return {"messages": out, "more": content.get("continuationToken") is not None}
+    return {"messages": out, "more": content.get("continuationToken") is not None,
+            "conversation": str(content.get("conversationId") or ""), "muted": content.get("muted") is True}
 
 
 def history(key: str, xuid, call: Call = None) -> dict:
@@ -171,24 +182,20 @@ def xbox_app_installed() -> bool:
 GAMEBAR_SOCIAL = "ms-gamebar://launchForeground/activate/Microsoft.GamingApp_8wekyb3d8bbwe_Microsoft.Xbox.WidgetsApp_SocialWidget"
 
 
-# The Xbox app's own sign-in screen (a link from its jump list). Game Bar shares the Xbox app's Windows sign-in, so
-# signing in there switches Game Bar too; the user picks the account in Microsoft's account picker. Confirmed to show
-# the login screen. (Once, before a reboot, the Xbox app hung on "Launching" after it; closing it from the tray or a
-# reboot cleared that.) If the link can't be opened, the Xbox app is started normally instead.
-XBOX_SIGN_IN = "msxbox://signIn/"
+# Game Bar shares the Xbox app's Windows sign-in, so signing in there as another account switches Game Bar too.
+# The app is started normally: its sign-in link (msxbox://signIn/, from its jump list) showed the login screen once
+# but left the Xbox app stuck on "Launching" twice (2026-11 and 2026-11-20), so it is not used.
 XBOX_APP = r"shell:AppsFolder\Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"
 
 
-def open_xbox_sign_in(start=None, installed=xbox_app_installed) -> bool:
+def open_xbox_app(start=None, installed=xbox_app_installed) -> bool:
     if not installed():
         return False
-    for link in (XBOX_SIGN_IN, XBOX_APP):
-        try:
-            (start or _start)(link)
-            return True
-        except OSError:
-            continue
-    return False
+    try:
+        (start or _start)(XBOX_APP)
+        return True
+    except OSError:
+        return False
 
 
 def open_gamebar_social(start=None, installed=lambda: _registered("ms-gamebar")) -> bool:
@@ -246,20 +253,30 @@ def parse_inbox(payload, me: str) -> dict:
         if not _xuid(other):
             continue
         last = c.get("lastMessage") if isinstance(c.get("lastMessage"), dict) else {}
-        chats.append({"xuid": other, "text": message_text(last) if last else "", "mine": str(last.get("sender")) == me,
+        chats.append({"xuid": other, "mine": str(last.get("sender")) == me,
+                      "text": ("(message deleted)" if last.get("isDeleted") else message_text(last)) if last else "",
                       "at": _iso_to_epoch(last.get("timestamp") or c.get("timestamp")),
-                      "unread": c.get("isRead") is False})
+                      "unread": c.get("isRead") is False, "muted": c.get("muted") is True,
+                      "conversation": str(c.get("conversationId") or ""),
+                      "horizon": str(last.get("clock") or last.get("messageId") or "")})
     chats.sort(key=lambda c: -(c["at"] or 0))
     return {"chats": chats, "groups": groups}
 
 
 def profiles(key: str, xuids: List[str], call: Call = None) -> dict:
     """xuid -> {gamertag, state, text} for these players (10 per request: Xbox refuses 20 with HTTP 400)."""
-    out, ids = {}, [x for x in dict.fromkeys(xuids) if _xuid(x)]
-    for i in range(0, len(ids), 10):
-        payload = (call or openxbl_call)("GET", API + "player/summary/" + ",".join(ids[i:i + 10]), key)
-        for p in parse_friend_list(payload, in_list=False):
-            out[p["xuid"]] = {"gamertag": p["gamertag"], "state": p["state"], "text": p["text"]}
+    from concurrent.futures import ThreadPoolExecutor
+    ids = [x for x in dict.fromkeys(xuids) if _xuid(x)]
+    batches = [ids[i:i + 10] for i in range(0, len(ids), 10)]
+
+    def one(batch):
+        return parse_friend_list((call or openxbl_call)("GET", API + "player/summary/" + ",".join(batch), key),
+                                 in_list=False)
+    out = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(5, len(batches)))) as pool:      # at the same time, not in turn
+        for people in pool.map(one, batches):
+            for p in people:
+                out[p["xuid"]] = {"gamertag": p["gamertag"], "state": p["state"], "text": p["text"], "pic": p["pic"]}
     return out
 
 
@@ -274,23 +291,85 @@ def inbox(key: str, call: Call = None) -> dict:
     res = parse_inbox((call or openxbl_call)("GET", API + "conversations", key), key.strip()[len(MARK):])
     names = profiles(key, [c["xuid"] for c in res["chats"]], call)
     for c in res["chats"]:
-        c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": ""}, preview=c["text"])
+        c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": "", "pic": ""},
+                 preview=c["text"])
     return res
 
 
 def unread_chats(key: str, call: Call = None) -> List[dict]:
     """Conversations whose newest message is from the other player and unread on Xbox, newest first, with names.
+    Chats you muted on Xbox are left out.
     One inbox request, plus one per 10 unread players for the names. Microsoft sign-in only (see inbox)."""
     from . import direct
     from .msauth import MARK
     if not direct.is_ms_key(key):
         return []
     res = parse_inbox((call or openxbl_call)("GET", API + "conversations", key), key.strip()[len(MARK):])
-    out = [c for c in res["chats"] if c["unread"] and not c["mine"]]
+    out = [c for c in res["chats"] if c["unread"] and not c["mine"] and not c["muted"]]
     names = profiles(key, [c["xuid"] for c in out], call) if out else {}
     for c in out:
         c.update(names.get(c["xuid"]) or {"gamertag": c["xuid"], "state": "Unknown", "text": ""}, preview=c["text"])
     return out
+
+
+def sot_minutes(key: str, xuids: List[str], call: Call = None) -> dict:
+    """Sea of Thieves minutes played per player (Xbox's MinutesPlayed statistic), for those who share it.
+    Microsoft sign-in only (an OpenXBL key gives {}). 50 players per request."""
+    from . import direct
+    if not direct.is_ms_key(key):
+        return {}
+    ids = [x for x in dict.fromkeys(xuids) if _xuid(x)]
+    out = {}
+    for i in range(0, len(ids), 50):
+        payload = (call or openxbl_call)("POST", API + "stats/sot-minutes", key, {"xuids": ids[i:i + 50]})
+        content = payload.get("content", payload) if isinstance(payload, dict) else {}
+        for group in content.get("statlistscollection") or []:
+            x = _xuid(group.get("arrangebyfieldid"))
+            for st in group.get("stats") or []:
+                v = str(st.get("value") or "").strip()
+                if x and st.get("name") == "MinutesPlayed" and v.isdigit():
+                    out[x] = int(v)
+    return out
+
+
+def _ms_only(key: str) -> None:
+    from . import direct
+    if not direct.is_ms_key(key):
+        raise ProviderError("This needs an account signed in with Microsoft (☰ > Add Xbox account...).")
+
+
+def _conv_id(cid) -> str:
+    c = str(cid or "").strip()
+    if not c or not all(ch.isalnum() or ch == "-" for ch in c):
+        raise ProviderError("Unknown conversation.")
+    return c
+
+
+def mute_chat(key: str, conversation: str, mute: bool = True, call: Call = None) -> None:
+    """Mute or unmute a conversation on Xbox (the same as in the Xbox app: no notifications from it)."""
+    _ms_only(key)
+    (call or openxbl_call)("PUT" if mute else "DELETE", API + f"conversations/{_conv_id(conversation)}/mute", key)
+
+
+def delete_message(key: str, conversation: str, message_id: str, call: Call = None) -> None:
+    """Delete one of your own messages (Xbox shows it as deleted to the other player too)."""
+    _ms_only(key)
+    mid = str(message_id or "").strip()
+    if not mid.isdigit():
+        raise ProviderError("Unknown message.")
+    (call or openxbl_call)("DELETE", API + f"conversations/{_conv_id(conversation)}/messages/{mid}", key)
+
+
+def delete_chat(key: str, conversation: str, horizon: str, call: Call = None) -> None:
+    """Remove a conversation from your inbox (up to its newest message, like the Xbox app's Delete conversation).
+    The other player keeps their copy; a new message brings the conversation back."""
+    _ms_only(key)
+    h = str(horizon or "").strip()
+    if not h.isdigit():
+        raise ProviderError("Unknown conversation state: refresh the inbox first.")
+    (call or openxbl_call)("PUT", API + "conversations/horizon", key,
+                           {"conversations": [{"conversationId": _conv_id(conversation), "conversationType": "OneToOne",
+                                               "horizonType": "Delete", "horizon": h}]})
 
 
 SOT_TITLE_ID = "1717113201"

@@ -7,10 +7,10 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from . import __version__, direct, social, sotrep, updater
+from . import __version__, chat_ui, direct, social, sotrep, updater, xboxui
 from .db import Database
 from .paths import data_dir
-from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError,
+from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError, account_picture,
                         find_gamertag, lookup_gamertag)
 from .game import game_running
 from .msauth import MARK, MsAccounts
@@ -45,6 +45,21 @@ def twitch_live(a, now) -> bool:
 
 def fmt_ts(ts) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "-"
+
+
+DEFAULT_HIDDEN = "xuid"          # card details hidden until the user shows them (Show on cards)
+
+
+def hours_text(minutes, stats_at) -> str:
+    """Hours played for the table: "1,234 h", "private" when Xbox didn't share it, "" when not asked yet."""
+    if minutes is not None:
+        return f"{int(minutes) // 60:,} h" if minutes >= 60 else f"{int(minutes)} min"
+    return "private" if stats_at else ""
+
+
+def _mix_hex(a, b, t):
+    from .chat_ui import _mix
+    return _mix(a, b, t)
 
 
 def theme_titlebar(win, pal) -> bool:
@@ -95,6 +110,11 @@ class Spinner(tk.Canvas):
 
 
 class App(SharedListMixin):
+    # where pictures and hours come from (swapped in tests, so they never reach Xbox)
+    fetch_profiles = staticmethod(lambda key, xuids: social.profiles(key, xuids))
+    fetch_minutes = staticmethod(lambda key, xuids: social.sot_minutes(key, xuids))
+    fetch_account_picture = staticmethod(lambda key: account_picture(key))
+
     def __init__(self, root: tk.Tk, db: Database):
         self.root, self.db = root, db
         self.sync = SyncService(db)
@@ -135,6 +155,11 @@ class App(SharedListMixin):
         self.msg_unread = []                     # unread chats not opened here yet (the Messages button count)
         self.toast = None
         self.inbox_win = None
+        self.inbox_cache = {}                    # key -> last inbox (shown at once next time)
+        self.chat_cache = {}                     # (key, xuid) -> last history
+        self.pictures = chat_ui.Pictures(data_dir() / "pictures", lambda fn: self.q.put(("call", fn)))
+        self._badged, self._pic_job = {}, None         # pictures with a Twitch badge; pending redraw
+        self.profiles_busy, self.profiles_at = False, 0.0
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.reload()
@@ -144,6 +169,7 @@ class App(SharedListMixin):
         self._schedule_twitch(20_000)
         self._schedule_shared(10_000)
         self._schedule_messages(8_000)
+        self.root.after(6_000, lambda: self._profiles_round(force=True))   # pictures and hours without a sync
         if db.recovered_from:
             self.set_status(f"Database was damaged; moved aside to {db.recovered_from}", error=True)
         updater.cleanup(updater.running_exe())                 # the old program file of a finished update
@@ -202,6 +228,15 @@ class App(SharedListMixin):
                          lightcolor=HEAD, darkcolor=HEAD, gripcount=0)
             st.map(sb, background=[("disabled", PANEL), ("active", acc), ("pressed", acc)],   # disabled: all fits
                    arrowcolor=[("disabled", P["muted"])])
+        # the player list: tall rows with a round profile picture, a calmer header
+        st.configure("Players.Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=50,
+                     borderwidth=0, font=("Segoe UI", 10))
+        st.configure("Players.Treeview.Heading", background=PANEL, foreground=P["muted"], relief="flat",
+                     padding=(8, 8), font=("Segoe UI", 8, "bold"))
+        st.map("Players.Treeview.Heading", background=[("active", HEAD)], foreground=[("active", FG)])
+        st.map("Players.Treeview", background=[("selected", _mix_hex(PANEL, acc, 0.55))],
+               foreground=[("selected", "#ffffff")])
+        st.layout("Players.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])          # no frame around it
         # the Messages list: a tree (name + preview line) without the expand arrows
         st.configure("Inbox.Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=24,
                      borderwidth=0, indent=0)
@@ -216,12 +251,59 @@ class App(SharedListMixin):
                          if isinstance(e.widget, (tk.Tk, tk.Toplevel)) else None)
         for w in [r] + [w for w in r.winfo_children() if isinstance(w, tk.Toplevel)]:
             theme_titlebar(w, P)
+        old = getattr(self, "_drawn_pal", None)
+        if old and old != P and hasattr(self, "tree"):
+            self._recolor(self.root, old, P)
+        self._drawn_pal = P
         if hasattr(self, "tree"):
             self.tree.tag_configure("friend", background=P["friend"])
             self.tree.tag_configure("odd", background=P["stripe"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
             self.legend.configure(bg=P["friend"], fg=FG)
             self.spinner.recolor(acc, BG)
+
+    def _recolor(self, widget, old, new):
+        """A theme change: every plain Tk widget in the main window whose colour was one of the old theme's colours
+        gets the new theme's colour; the drawn widgets (pills, fields, cards) redraw with the new palette."""
+        mapping = {}
+        for k in ("bg", "head", "panel", "fg", "muted", "accent", "friend"):
+            mapping.setdefault(str(old[k]).lower(), new[k])
+        for w in [widget] + self._all_children(widget):
+            if isinstance(w, tk.Toplevel):
+                continue
+            if isinstance(w, (chat_ui.RoundButton, chat_ui.RoundBox, chat_ui.PlayerCards)):
+                w.pal = new
+            if isinstance(w, chat_ui.RoundBox):
+                old_fill = w.fill
+                w.fill = chat_ui._mix(new["panel"], new["fg"], 0.07)
+                mapping[str(old_fill).lower()] = w.fill
+            if isinstance(w, ttk.Widget):
+                continue
+            for opt in ("bg", "fg", "insertbackground", "activebackground"):
+                try:
+                    v = str(w.cget(opt)).lower()
+                except tk.TclError:
+                    continue
+                if v in mapping:
+                    try:
+                        w.configure(**{opt: mapping[v]})
+                    except tk.TclError:
+                        pass
+        for w in [widget] + self._all_children(widget):
+            if isinstance(w, chat_ui.RoundButton):
+                w._draw()
+            elif isinstance(w, chat_ui.RoundBox):
+                w._layout()
+            elif isinstance(w, chat_ui.PlayerCards):
+                w._schedule()
+
+    def _all_children(self, w):
+        out = []
+        for c in w.winfo_children():
+            if not isinstance(c, tk.Toplevel):
+                out.append(c)
+                out += self._all_children(c)
+        return out
 
     def _apply_icon(self):
         try:
@@ -246,79 +328,118 @@ class App(SharedListMixin):
         self._apply_icon()
 
         # ---- top bar: account and refresh on the left, the main actions on the right, the rest in the ☰ menu
-        bar = ttk.Frame(r, style="Bar.TFrame", padding=(10, 8))
+        P = self.pal
+        self._pills = []                                   # drawn buttons, recoloured when the theme changes
+
+        def pill(parent, text, cmd, kind="soft", **kw):
+            b = chat_ui.RoundButton(parent, text, cmd, P, parent.cget("bg"), kind=kind, **kw)
+            self._pills.append(b)
+            return b
+
+        # ---- top bar: account and refresh on the left, the main actions on the right, the rest in the ☰ menu
+        bar = tk.Frame(r, bg=P["head"])
         bar.pack(fill="x")
+        self.top_bar = bar
+        inner = tk.Frame(bar, bg=P["head"])
+        inner.pack(fill="x", padx=12, pady=9)
         self.acct_var = tk.StringVar()
-        self.acct_box = ttk.Combobox(bar, textvariable=self.acct_var, state="readonly", width=20)
+        self.acct_box = chat_ui.PillSelect(inner, P, P["head"], self.acct_var, on_change=self.switch_account,
+                                           extra=[("Add Xbox account...", self.set_key)],
+                                           font=("Segoe UI", 10, "bold"), padx=16, pady=7,
+                                           image_for=self._account_image)
+        self._pills.append(self.acct_box)
         self.acct_box.pack(side="left")
-        self.acct_box.bind("<<ComboboxSelected>>", lambda e: self.switch_account())
-        ttk.Button(bar, text="↻  Refresh", style="Accent.TButton", command=self.refresh_now).pack(side="left",
-                                                                                                padx=(8, 0))
-        ttk.Label(bar, text="Auto", style="BarHint.TLabel").pack(side="left", padx=(16, 4))
+        pill(inner, "↻  Refresh", self.refresh_now, kind="accent", font=("Segoe UI", 10, "bold"), padx=16,
+             pady=7).pack(side="left", padx=(8, 0))
         self.mode_var = tk.StringVar(value=REFRESH_MODES[2] if self.paused else
                                      XBOX_MODE if self.db.get_setting("refresh_xbox", "0") == "1" else
                                      REFRESH_MODES[0] if self.db.get_setting("only_with_game", "1") == "1"
                                      else REFRESH_MODES[1])
-        mb = ttk.Combobox(bar, textvariable=self.mode_var, state="readonly", width=24,
-                          values=(REFRESH_MODES[0], XBOX_MODE, REFRESH_MODES[1], REFRESH_MODES[2]))
-        mb.pack(side="left")
-        mb.bind("<<ComboboxSelected>>", lambda e: self.set_refresh_mode(self.mode_var.get()))
-        ttk.Label(bar, text="every", style="BarHint.TLabel").pack(side="left", padx=(8, 4))
+        self.mode_box = chat_ui.PillSelect(inner, P, P["head"], self.mode_var,
+                                           values=(REFRESH_MODES[0], XBOX_MODE, REFRESH_MODES[1], REFRESH_MODES[2]),
+                                           on_change=lambda: self.set_refresh_mode(self.mode_var.get()),
+                                           prefix="Auto:  ", padx=14, pady=7)
+        self._pills.append(self.mode_box)
+        self.mode_box.pack(side="left", padx=(16, 0))
+        tk.Label(inner, text="every", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
+                                                                                           padx=(10, 4))
         self.interval = tk.IntVar(value=int(self.db.get_setting("interval", "60")))
-        sp = ttk.Spinbox(bar, from_=MIN_INTERVAL, to=3600, increment=10, width=4, textvariable=self.interval,
+        sp = ttk.Spinbox(inner, from_=MIN_INTERVAL, to=3600, increment=10, width=4, textvariable=self.interval,
                          command=self._save_interval)
         sp.pack(side="left")
         sp.bind("<FocusOut>", lambda e: self._save_interval())
-        ttk.Label(bar, text="s", style="BarHint.TLabel").pack(side="left", padx=(3, 0))
+        tk.Label(inner, text="s", bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(3, 0))
         self.auto_upd = tk.BooleanVar(value=self.db.get_setting("auto_update_check", "1") == "1")
-        self.menu_btn = ttk.Button(bar, text="☰", width=3, style="Tool.TButton", command=self._main_menu)
-        self.menu_btn.pack(side="right", padx=(4, 0))
+        self.menu_btn = pill(inner, "☰", self._main_menu, padx=12, pady=7)
+        self.menu_btn.pack(side="right", padx=(6, 0))
         for text, cmd in (("Live streams", self.sot_streams), ("Check live", self.check_live_all),
                           ("Messages", self.inbox_dialog), ("Friends", self.friends_dialog)):
-            b = ttk.Button(bar, text=text, style="Tool.TButton", command=cmd)
-            b.pack(side="right", padx=2)
+            b = pill(inner, text, cmd, pady=7)
+            b.pack(side="right", padx=3)
             if text == "Messages":
                 self.msg_btn = b
         self.msg_popups = tk.BooleanVar(value=self.db.get_setting("message_popups", "1") == "1")
         self._refresh_accounts()
 
-        self.players_tab = ttk.Frame(r)
+        self.players_tab = tk.Frame(r, bg=P["bg"])
         self.players_tab.pack(fill="both", expand=True)
         try:
             self.twitch_img = tk.PhotoImage(file=str(twitch_icon_path()))
         except tk.TclError:
             self.twitch_img = tk.PhotoImage(width=1, height=1)   # missing asset must never stop the app
 
-        bar2 = ttk.Frame(self.players_tab)
-        bar2.pack(fill="x", padx=10, pady=(10, 6))
-        ttk.Label(bar2, text="Search", style="Hint.TLabel").pack(side="left", padx=(0, 6))
+        # ---- search, then how the list is sorted and which details the cards show
+        bar2 = tk.Frame(self.players_tab, bg=P["bg"])
+        bar2.pack(fill="x", padx=14, pady=(12, 4))
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *a: self.reload())
-        ttk.Entry(bar2, textvariable=self.search).pack(side="left", fill="x", expand=True)
-        ttk.Button(bar2, text="Reset table", command=self.reset_table).pack(side="left", padx=(6, 0))
 
-        table = ttk.Frame(self.players_tab)
-        table.pack(fill="both", expand=True, padx=10)
-        cols = ("gamertag", "xuid", "tags", "twitch", "last_seen", "origin", "current")
-        self.tree = ttk.Treeview(table, columns=cols, show="tree headings", selectmode="extended")
-        self.col_titles = {"gamertag": "Gamertag", "xuid": "XUID", "tags": "Tags", "twitch": "Twitch",
-                           "last_seen": "Last seen", "origin": "Source", "current": "#"}
+        def make_search(parent, bg):
+            return tk.Entry(parent, textvariable=self.search, bg=bg, fg=P["fg"], insertbackground=P["fg"],
+                            relief="flat", bd=0, font=("Segoe UI", 10), highlightthickness=0)
+        self.search_box = chat_ui.RoundBox(bar2, P, P["bg"], make_search, height=38, radius=19)
+        self.search_box.pack(side="left", fill="x", expand=True)
+        hint = tk.Label(bar2, text="Search players, tags or XUID", bg=self.search_box.fill, fg=P["muted"],
+                        font=("Segoe UI", 10))
+        entry = self.search_box.inner
+
+        def show_hint(*_):
+            if self.search.get() or self.root.focus_get() is entry:
+                hint.place_forget()
+            else:
+                hint.place(in_=self.search_box, x=20, rely=0.5, anchor="w")
+        self.search.trace_add("write", show_hint)
+        entry.bind("<FocusIn>", show_hint, add="+")
+        entry.bind("<FocusOut>", show_hint, add="+")
+        hint.bind("<Button-1>", lambda e: entry.focus_set())
+        self.root.after_idle(show_hint)
+        sortbar = tk.Frame(self.players_tab, bg=P["bg"])
+        sortbar.pack(fill="x", padx=14, pady=(6, 4))
+        tk.Label(sortbar, text="Sort by", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
+                                                                                              padx=(4, 8))
+        self.sort_chips = {}
+        for col, label in (("current", "Xbox list"), ("last_seen", "Last seen"), ("hours", "Hours"),
+                           ("gamertag", "Name"), ("twitch", "Twitch"), ("tags", "Tags")):
+            b = pill(sortbar, label, lambda c=col: self.sort_by(c), padx=12, pady=5)
+            b.pack(side="left", padx=3)
+            b.label = label
+            self.sort_chips[col] = b
+        pill(sortbar, "Reset view", self.reset_table, padx=12, pady=5).pack(side="right", padx=3)
+        self.fields_btn = pill(sortbar, "Show on cards  ▾", self._fields_menu, padx=12, pady=5)
+        self.fields_btn.pack(side="right", padx=3)
+
+        cols = ("gamertag", "hours", "xuid", "tags", "twitch", "last_seen", "origin", "current")
+        self.tree = chat_ui.PlayerCards(self.players_tab, P, cols)
+        self.col_titles = {"gamertag": "Gamertag", "hours": "Hours in SoT", "xuid": "XUID", "tags": "Tags",
+                           "twitch": "Twitch", "last_seen": "Last seen", "origin": "Source", "current": "#"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
-        self.tree.column("#0", width=34, minwidth=34, stretch=False, anchor="center")  # Twitch icon, only when live
-        self.tree.heading("#0", text="")
         for c, w in self.COL_WIDTHS.items():
-            self.tree.heading(c, command=lambda c=c: self.sort_by(c))
-            self.tree.column(c, width=w, minwidth=30, anchor="center" if c == "current" else "w",
-                             stretch=c not in ("origin", "current"))
+            self.tree.column(c, width=w)
         self._apply_hidden_columns()
         self._update_headings()
-        # ttk: the tag created FIRST wins when a row has several, so "friend" must be created before "odd"
         self.tree.tag_configure("friend", background=self.pal["friend"])
         self.tree.tag_configure("odd", background=self.pal["stripe"])
-        sb = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.pack(fill="both", expand=True, padx=(6, 8), pady=(2, 0))
         self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", lambda e: None if self._twitch_cell(e) else self.open_selected())
         self.tree.bind("<Return>", lambda e: self.open_selected())
@@ -331,7 +452,7 @@ class App(SharedListMixin):
         self.status = tk.StringVar()
         self.live_status = tk.StringVar(value="")
         statusbar = ttk.Frame(r)
-        statusbar.pack(fill="x", padx=10, pady=(6, 8))
+        statusbar.pack(fill="x", padx=14, pady=(6, 8))
         self.spinner = Spinner(statusbar, color=self.pal["accent"], bg=self.pal["bg"])
         self.spinner.pack(side="left", padx=(0, 6))
         self.count_lbl = ttk.Label(statusbar, text="")
@@ -363,16 +484,17 @@ class App(SharedListMixin):
                              (a["twitch_name"] or "").casefold()),
         "last_seen": lambda a: (a["last_seen"], -(a["pos"] if a["pos"] is not None else 10 ** 9)),
         "origin": lambda a: a["source"],
+        "hours": lambda a: a["sot_minutes"] if a["sot_minutes"] is not None else -1,
         "current": lambda a: (0, a["pos"]) if a["pos"] is not None else (1, -a["last_seen"]),
     }
 
-    COL_WIDTHS = {"gamertag": 170, "xuid": 130, "tags": 110, "twitch": 190, "last_seen": 115, "origin": 55,
-                  "current": 44}
+    COL_WIDTHS = {"gamertag": 180, "hours": 96, "xuid": 130, "tags": 110, "twitch": 190, "last_seen": 115,
+                  "origin": 60, "current": 44}
 
     def reset_table(self):
         """Back to the default view: Xbox list order, no search, all columns shown at their normal width."""
         self.sort_col, self.sort_desc = "current", False
-        self.db.set_setting("hidden_columns", "")
+        self.db.set_setting("hidden_columns", DEFAULT_HIDDEN)
         self._apply_hidden_columns()
         for c, w in self.COL_WIDTHS.items():
             self.tree.column(c, width=w)
@@ -387,9 +509,17 @@ class App(SharedListMixin):
         self.reload()
 
     def _update_headings(self):
-        for c, t in self.col_titles.items():
-            arrow = (" ▼" if self.sort_desc else " ▲") if c == self.sort_col else ""
-            self.tree.heading(c, text=t + arrow)
+        """The active sort chip is filled, with an arrow for the direction."""
+        for c, b in getattr(self, "sort_chips", {}).items():
+            active = c == self.sort_col
+            b.set_kind("accent" if active else "soft")
+            b.set_text(b.label + ((" ▼" if self.sort_desc else " ▲") if active else ""))
+
+    def _fields_menu(self):
+        """Which details the cards show (remembered), the same as hiding a column used to be."""
+        b = self.fields_btn
+        ev = type("E", (), {"x_root": b.winfo_rootx(), "y_root": b.winfo_rooty() + b.winfo_height() + 2})()
+        self._column_menu(ev)
 
     def reload(self, to_top=False):
         sel = set() if to_top else {self.tree.set(i, "xuid") + "|" + self.tree.set(i, "gamertag")
@@ -411,25 +541,99 @@ class App(SharedListMixin):
                 if tw_live:
                     v = a["twitch_viewers"]
                     tw_text = (f"● {v}  " if v is not None else "●  ") + tw_text
+            live = a["id"] in live_ids or tw_live
             iid = self.tree.insert(
-                "", "end", iid=str(a["id"]), image=self.twitch_img if (a["id"] in live_ids or tw_live) else "",
-                tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()), values=(
-                    a["gamertag"], a["xuid"] or "", a["tags"] or "", tw_text, fmt_ts(a["last_seen"]),
+                "", "end", iid=str(a["id"]), image=self._row_picture(a["pic"], live),
+                tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()) + (("live",) if live else ()),
+                values=(
+                    a["gamertag"], hours_text(a["sot_minutes"], a["stats_at"]), a["xuid"] or "", a["tags"] or "",
+                    tw_text, fmt_ts(a["last_seen"]),
                     "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
                     str(a["pos"] + 1) if a["pos"] is not None else ""))
             if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
                 self.tree.selection_add(iid)
         self.tree.yview_moveto(top)  # a background refresh must not scroll the list back to the top
         self.count_lbl.configure(text=f"{self.db.count_accounts()} unique accounts")
+        self._shown_xuids = [a["xuid"] for a in rows[:150] if a["xuid"]]       # for the pictures/hours round
+
+    def _row_picture(self, raw, live):
+        """The round profile picture for a row, with a small Twitch badge when live ("" = nothing)."""
+        img = self.pictures.get(raw, lambda raw=raw: self._picture_ready(raw)) if raw else None
+        if not live:
+            return img or ""
+        k = (raw if img is not None else "", "live")
+        if k not in self._badged:
+            size = chat_ui.PICTURE_SIZE
+            out = tk.PhotoImage(width=size, height=size)
+            if img is not None:
+                out.tk.call(out, "copy", img)
+            out.tk.call(out, "copy", self.twitch_img, "-to", size - 16, size - 16, "-compositingrule", "overlay")
+            self._badged[k] = out
+        return self._badged[k]
+
+    def _picture_ready(self, raw):
+        """A profile picture arrived: put it on the rows that wait for it (no full reload)."""
+        if self._pic_job is None:
+            self._pic_job = self.root.after(150, self._pictures_arrived)
+
+    def _pictures_arrived(self):
+        self._pic_job = None
+        self.reload()
+
+    # ---- profile pictures and hours played, filled in the background ----
+    def _profiles_round(self, force=False):
+        """After a sync (and at start): pictures for players that have none (Xbox's player summary, 10 per request)
+        and Sea of Thieves hours for players not asked in the last day (one request per 50; Microsoft sign-in only).
+        Only the players in Xbox's list and the top of the table; at most once a minute."""
+        key = self.xkey.get()
+        if not key or self.profiles_busy or self.closing:
+            return
+        if not force and time.time() - self.profiles_at < 60:
+            return
+        owner = self.xkey.active() or ""
+        xuids = [r["xuid"] for r in self.db.list_accounts("", owner) if r["in_latest"] and r["xuid"]]
+        xuids += getattr(self, "_shown_xuids", [])
+        need_pic, need_stats = self.db.profiles_due(xuids)
+        # pictures of players in Xbox's list come with every sync; these are older players further down: few at a
+        # time, so Xbox's rate limit isn't reached
+        need_pic, need_stats = need_pic[:20], (need_stats[:150] if direct.is_ms_key(key) else [])
+        if not need_pic and not need_stats:
+            return
+        self.profiles_busy, self.profiles_at = True, time.time()
+
+        def work():
+            pics, mins, err = {}, {}, None
+            try:
+                if need_pic:
+                    found = self.fetch_profiles(key, need_pic)
+                    pics = {x: (found.get(x) or {}).get("pic", "") for x in need_pic}
+                if need_stats:
+                    mins = self.fetch_minutes(key, need_stats)
+            except ProviderError as e:
+                err = str(e)
+            except Exception as e:                       # never let a worker thread die silently
+                err = f"Unexpected error: {e}"
+            self.q.put(("call", lambda: done(pics, mins, err)))
+
+        def done(pics, mins, err):
+            self.profiles_busy = False
+            if pics:
+                self.db.save_pictures(pics)
+            if need_stats and err is None:
+                self.db.save_minutes(need_stats, mins)
+            if pics or (need_stats and err is None):
+                self.reload()
+        threading.Thread(target=work, daemon=True).start()
 
     def _twitch_cell(self, event):
         """The row id when the click was on the live icon or in the Twitch column, else None."""
         row = self.tree.identify_row(event.y)
+        self.tree._last_y = event.y                       # the cards need the row to know where the Twitch pill is
         col = self.tree.identify_column(event.x)
         if not row:
             return None
         if col == "#0":
-            return row
+            return row if "live" in self.tree.item(row, "tags") else None
         idx = int(col[1:]) - 1 if col.startswith("#") and col[1:].isdigit() else -1
         cols = self.tree["displaycolumns"]                 # "#n" counts the columns on screen, not all of them
         if not cols or cols[0] == "#all":
@@ -444,7 +648,7 @@ class App(SharedListMixin):
         links = self.db.twitch_links([int(row)])
         if links:
             webbrowser.open(f"https://www.twitch.tv/{links[0]['login']}")
-        elif self.tree.item(row, "image"):
+        elif "live" in self.tree.item(row, "tags"):
             self.set_status("Xbox says this player is broadcasting, but no Twitch channel is linked yet. "
                             "Right-click > Link Twitch channel..., or use Live streams, to link it.")
 
@@ -478,14 +682,14 @@ class App(SharedListMixin):
         ] + ([(None, None, True), ("Remove from master list", self.remove_from_master, True)]
              if self.is_list_owner() else [])
 
-    HIDEABLE = ("xuid", "tags", "twitch", "last_seen", "origin", "current")
+    HIDEABLE = ("hours", "xuid", "tags", "twitch", "last_seen", "origin", "current")
 
     def _apply_hidden_columns(self):
-        hidden = set(filter(None, self.db.get_setting("hidden_columns", "").split(",")))
+        hidden = set(filter(None, self.db.get_setting("hidden_columns", DEFAULT_HIDDEN).split(",")))
         self.tree["displaycolumns"] = [c for c in self.tree["columns"] if c not in hidden]
 
     def toggle_column(self, col):
-        hidden = set(filter(None, self.db.get_setting("hidden_columns", "").split(",")))
+        hidden = set(filter(None, self.db.get_setting("hidden_columns", DEFAULT_HIDDEN).split(",")))
         hidden ^= {col}
         self.db.set_setting("hidden_columns", ",".join(sorted(hidden)))
         self._apply_hidden_columns()
@@ -665,19 +869,49 @@ class App(SharedListMixin):
             self.open_xbox_profile(self.tree.set(i, "gamertag"), self.tree.set(i, "xuid"))
 
     def switch_game_bar(self):
-        """Game Bar uses the Xbox app's Windows sign-in, which only Microsoft's apps can change. Open the Xbox app's
-        sign-in screen and copy the selected account's gamertag; the user picks that account in Microsoft's picker."""
+        """Game Bar uses the Xbox app's Windows sign-in, which only Microsoft's apps can change. Open the Xbox app,
+        sign it out through its own menu and press Sign in (see xboxui.py), so Microsoft's account picker opens; the
+        user picks the account there. The gamertag is copied too."""
         name = self.xkey.active()
         if not name:
             return self.set_status("Add an Xbox account first.", error=True)
+        if "xboxapp" in self.busy:
+            return self.set_status("Already switching the Xbox app's account...")
         self.root.clipboard_clear()
         self.root.clipboard_append(name)
-        if social.open_xbox_sign_in():
-            self.set_status(f"Xbox sign-in opened ({name} copied). Sign in as {name}: Game Bar uses the same sign-in. "
-                            "Accounts added in Windows Settings > Accounts > Email & accounts need no password.")
-        else:
-            self.set_status(f"Couldn't open the Xbox app ({name} copied). In the Xbox app, click your profile > "
-                            "Sign out, then sign in as {name}.".replace("{name}", name), error=True)
+        manual = (f"In the Xbox app, click your profile picture (top left) > Sign out, then sign in as {name}: "
+                  "Game Bar uses the same sign-in.")
+        if not social.open_xbox_app():
+            return self.set_status(f"Couldn't open the Xbox app ({name} copied). {manual}", error=True)
+        key = self.xkey.get() or ""
+        email = self.msa.email(key.strip()[len(MARK):]) if direct.is_ms_key(key) else ""
+        self.set_status(f"Switching the Xbox app to {name}... (don't use the mouse for a moment)")
+        self._set_busy("xboxapp", True)
+
+        def work():
+            res = xboxui.switch_account(name, email)
+            self.q.put(("call", lambda: done(res)))
+
+        def done(res):
+            self._set_busy("xboxapp", False)
+            teach = ("" if email else " Tip: sign this account in again once (☰ > Add Xbox account... > Sign in with "
+                     "Microsoft) and the app picks it in that window for you next time.")
+            msgs = {
+                xboxui.ALREADY: (f"The Xbox app (and Game Bar) is already signed in as {name}.", False),
+                xboxui.PICKED: (f"Picked {name} in Microsoft's sign-in window: the Xbox app and Game Bar switch to it. "
+                                "If Microsoft asks for a password, type it there.", False),
+                xboxui.NOT_LISTED: (f"Microsoft's sign-in window doesn't list {name}'s email yet: choose \"Use a "
+                                    "different account\" there and sign in once.", False),
+                xboxui.PICKER: (f"Signed out of the Xbox app. Pick {name} in Microsoft's sign-in window "
+                                f"({name} copied): Game Bar then uses it too." + teach, False),
+                xboxui.SIGN_IN_SCREEN: (f"Signed out of the Xbox app. Click Sign in there and pick {name}.", False),
+                xboxui.NO_WINDOW: ("The Xbox app didn't open its window (stuck on \"Launching\"? Restarting the PC "
+                                   "fixes that). " + manual, True),
+                xboxui.BLOCKED: ("Something covered the Xbox window, so nothing was clicked. " + manual, True),
+            }
+            text, err = msgs.get(res, (f"Couldn't switch the Xbox app by itself ({res}). " + manual, True))
+            self.set_status(text, error=err)
+        threading.Thread(target=work, daemon=True).start()
 
     def invite_or_join(self, gt=None):
         """Xbox only offers game invites and joining inside its own UI: open Game Bar's Xbox Social widget and put
@@ -715,118 +949,162 @@ class App(SharedListMixin):
         panel = self._chat_panel(win, gt, xuid)
         panel.pack(fill="both", expand=True)
         win.send, win.box, win.info, win.texts = panel.send, panel.box, panel.info, panel.texts   # kept for tests
+        win.sotrep_btn = panel.sotrep_btn
         panel.box.focus_set()
-        self._place_dialog(win, 640, 620)
+        self._place_dialog(win, 680, 640)
         return win
 
-    def _chat_panel(self, parent, gt, xuid, on_sent=None):
-        """Your Xbox message history with one player as bubbles (yours right, theirs left) and a box to write a new
-        one. Nothing is sent until Send (or Ctrl+Enter). Used by the chat window and the Messages window."""
-        pal = self.pal
-        panel = tk.Frame(parent, bg=pal["bg"])
-        head = tk.Frame(panel, bg=pal["head"])
+    # ---- conversation actions (Microsoft sign-in), shared by the chat and the Messages list
+    def _mute_chat(self, gt, conversation, mute, after=None):
+        def done(_, err):
+            if err:
+                return self.set_status(f"Could not {'mute' if mute else 'unmute'} {gt}: {err}", error=True)
+            self.set_status(f"{'Muted' if mute else 'Unmuted'} the chat with {gt} on Xbox.")
+            if after:
+                after()
+        self._xbox_bg(lambda k: social.mute_chat(k, conversation, mute), done)
+
+    def _delete_chat(self, parent, gt, conversation, horizon, after=None):
+        """Asks inside parent (no separate window), then removes the chat from your Xbox inbox."""
+        def go():
+            def done(_, err):
+                if err:
+                    return self.set_status(f"Could not delete the chat with {gt}: {err}", error=True)
+                self.set_status(f"Deleted the chat with {gt} from your Xbox inbox.")
+                if after:
+                    after()
+            self._xbox_bg(lambda k: social.delete_chat(k, conversation, horizon), done)
+        return chat_ui.confirm_card(parent, self.pal, f"Delete the chat with {gt} from your Xbox inbox? {gt} keeps "
+                                    "their copy, and a new message brings the chat back.", "Delete chat", go)
+
+    def _picture_of(self, xuid):
+        """The profile picture address of a player we've seen in an inbox, else ""."""
+        for res in self.inbox_cache.values():
+            for c in res.get("chats", []):
+                if c.get("xuid") == str(xuid) and c.get("pic"):
+                    return c["pic"]
+        return ""
+
+    def _chat_panel(self, parent, gt, xuid, on_sent=None, on_changed=None, pic=""):
+        """Your Xbox message history with one player as rounded bubbles (yours right, theirs left) and a box to
+        write a new one. Nothing is sent until Send (or Ctrl+Enter). ⋯ mutes or deletes the chat; right-click a
+        message to copy it or delete your own. Used by the chat window and the Messages window."""
+        P = self.pal
+        panel = tk.Frame(parent, bg=P["bg"])
+        state_ = {"conv": "", "muted": False, "horizon": ""}
+        cache_key = (self.xkey.get() or "", str(xuid))
+
+        head = tk.Frame(panel, bg=P["head"])
         head.pack(fill="x")
-        tk.Label(head, text=gt, bg=pal["head"], fg=pal["fg"], font=("Segoe UI", 13, "bold")).pack(
-            side="left", padx=(14, 6), pady=10)
+        av = tk.Canvas(head, width=44, height=44, bg=P["head"], highlightthickness=0)
+        av.pack(side="left", padx=(14, 10), pady=10)
+        pic = pic or self._picture_of(xuid)
+
+        def draw_av():
+            if av.winfo_exists():
+                av.delete("all")
+                chat_ui.draw_avatar(av, 22, 22, 20, gt, xuid, P, self.pictures.get(pic, draw_av))
+        draw_av()
+        names = tk.Frame(head, bg=P["head"])
+        names.pack(side="left", fill="y", pady=8)
+        tk.Label(names, text=gt, bg=P["head"], fg=P["fg"], font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
         info = tk.StringVar(value="Loading your messages...")
-        tk.Label(head, textvariable=info, bg=pal["head"], fg=pal["muted"], font=("Segoe UI", 9)).pack(side="left")
-        ttk.Button(head, text="Xbox profile", style="Tool.TButton",
-                   command=lambda: self.open_xbox_profile(gt, xuid)).pack(side="right", padx=(4, 12))
-        ttk.Button(head, text="Invite / join in Game Bar", style="Tool.TButton",
-                   command=lambda: self.invite_or_join(gt)).pack(side="right")
+        tk.Label(names, textvariable=info, bg=P["head"], fg=P["muted"], font=("Segoe UI", 8), anchor="w").pack(
+            anchor="w")
 
-        # scrollable message area: a frame inside a canvas, kept as wide as the canvas
-        area = tk.Frame(panel, bg=pal["bg"])
-        area.pack(fill="both", expand=True)
-        canvas = tk.Canvas(area, bg=pal["bg"], highlightthickness=0)
-        sb = ttk.Scrollbar(area, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        inner = tk.Frame(canvas, bg=pal["bg"])
-        inner_id = canvas.create_window(0, 0, window=inner, anchor="nw")
-        bubbles = []
+        def more_menu():
+            m = self._menu(panel)
+            ms = direct.is_ms_key(self.xkey.get())
+            can = "normal" if ms and state_["conv"] else "disabled"
+            m.add_command(label="Unmute chat" if state_["muted"] else "Mute chat", state=can,
+                          command=lambda: self._mute_chat(gt, state_["conv"], not state_["muted"], after=changed))
+            m.add_command(label="Delete chat...", state="normal" if can == "normal" and state_["horizon"] else "disabled",
+                          command=lambda: self._delete_chat(panel, gt, state_["conv"], state_["horizon"],
+                                                            after=changed))
+            m.add_separator()
+            m.add_command(label="Invite / join in Game Bar", command=lambda: self.invite_or_join(gt))
+            m.add_command(label="Copy gamertag", command=lambda: (self.root.clipboard_clear(),
+                                                                  self.root.clipboard_append(gt)))
+            m.tk_popup(more.winfo_rootx(), more.winfo_rooty() + more.winfo_height())
 
-        def on_resize(e):
-            canvas.itemconfigure(inner_id, width=e.width)
-            for b in bubbles:
-                b.configure(wraplength=max(160, int(e.width * 0.62)))
-        canvas.bind("<Configure>", on_resize)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        def changed():
+            load()
+            if on_changed:
+                on_changed()
+        more = chat_ui.RoundButton(head, "⋯", more_menu, P, P["head"], padx=12)
+        more.pack(side="right", padx=(4, 14))
+        rep = chat_ui.RoundButton(head, "SOTREP", lambda: webbrowser.open(sotrep.profile_url(gt)), P, P["head"])
+        rep.pack(side="right", padx=4)
+        if gt.startswith("Unknown player"):                    # no gamertag known: nothing to search on SOTREP
+            rep.state(["disabled"])
+        panel.sotrep_btn = rep
+        chat_ui.RoundButton(head, "Xbox profile", lambda: self.open_xbox_profile(gt, xuid), P, P["head"]).pack(
+            side="right", padx=4)
 
-        def wheel(e):
-            canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
-        # the wheel scrolls the chat only while the mouse is over it (a list next to it keeps its own scrolling)
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        def message_menu(m, e):
+            menu = self._menu(panel)
+            if not m.get("deleted"):
+                menu.add_command(label="Copy text", command=lambda: (self.root.clipboard_clear(),
+                                                                    self.root.clipboard_append(m["text"])))
+            mine = m["sender"] != str(xuid)
+            if mine and not m.get("deleted") and m.get("id") and state_["conv"] and direct.is_ms_key(self.xkey.get()):
+                menu.add_command(label="Delete message...", command=lambda: delete_message(m))
+            if menu.index("end") is not None:
+                menu.tk_popup(e.x_root, e.y_root)
 
-        compose = tk.Frame(panel, bg=pal["panel"])
-        compose.pack(fill="x")
-        send_btn = ttk.Button(compose, text="Send", width=8, style="Accent.TButton")
-        send_btn.pack(side="right", padx=(0, 12), pady=10)             # packed first so the box can't squeeze it
-        box = tk.Text(compose, height=3, wrap="word", bg=pal["bg"], fg=pal["fg"], insertbackground=pal["fg"],
-                      relief="flat", font=("Segoe UI", 10), padx=8, pady=6)
-        box.pack(side="left", fill="both", expand=True, padx=(12, 8), pady=10)
+        def delete_message(m):
+            def go():
+                def done(_, err):
+                    if err:
+                        return self.set_status(f"Could not delete the message: {err}", error=True)
+                    self.set_status("Message deleted.")
+                    load()
+                self._xbox_bg(lambda k: social.delete_message(k, state_["conv"], m["id"]), done)
+            text = m["text"] if len(m["text"]) <= 120 else m["text"][:120] + "…"
+            panel.confirm = chat_ui.confirm_card(panel, P, f"Delete this message? It shows as deleted for {gt} too.\n"
+                                                 f"\u201c{text}\u201d", "Delete", go)
+
+        view = chat_ui.ChatView(panel, P, on_menu=message_menu)
+        view.pack(fill="both", expand=True)
+
+        compose = tk.Frame(panel, bg=P["bg"])
+        compose.pack(fill="x", padx=12, pady=(6, 2))
+        send_btn = chat_ui.RoundButton(compose, "Send", None, P, P["bg"], kind="accent", padx=20, pady=9,
+                                       font=("Segoe UI", 10, "bold"))
+        send_btn.pack(side="right", padx=(8, 0))                   # packed first so the box can't squeeze it
+
+        def make_text(parent_, bg):
+            return tk.Text(parent_, height=2, wrap="word", bg=bg, fg=P["fg"], insertbackground=P["fg"],
+                           relief="flat", bd=0, font=("Segoe UI", 10), highlightthickness=0)
+        rbox = chat_ui.RoundBox(compose, P, P["bg"], make_text, height=58, radius=18)
+        rbox.pack(side="left", fill="x", expand=True)
+        box = rbox.inner
         state = tk.StringVar()
-        hint = f"Ctrl+Enter sends · at most {social.MAX_MESSAGE} characters · non-friends get it as a message request"
-        tk.Label(panel, textvariable=state, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8), anchor="w").pack(
-            fill="x", padx=12, pady=(0, 6))
+        hint = f"Ctrl+Enter sends · at most {social.MAX_MESSAGE} characters · right-click a message for more"
+        tk.Label(panel, textvariable=state, bg=P["bg"], fg=P["muted"], font=("Segoe UI", 8), anchor="w").pack(
+            fill="x", padx=18, pady=(0, 8))
         state.set(hint)
         box.bind("<KeyRelease>", lambda e: state.set(
             f"{len(box.get('1.0', 'end').strip())} / {social.MAX_MESSAGE}  ·  Ctrl+Enter sends"))
 
-        def day_label(at):
-            d = time.localtime(at)
-            today = time.localtime()
-            yesterday = time.localtime(time.time() - 86400)
-            if d[:3] == today[:3]:
-                return "Today"
-            if d[:3] == yesterday[:3]:
-                return "Yesterday"
-            return time.strftime("%A %d %B" + (" %Y" if d.tm_year != today.tm_year else ""), d)
-
-        def add_line(text):
-            tk.Label(inner, text=text, bg=pal["bg"], fg=pal["muted"], font=("Segoe UI", 8)).pack(pady=(10, 2))
-
-        def add_bubble(m):
-            mine = m["sender"] != xuid
-            row = tk.Frame(inner, bg=pal["bg"])
-            row.pack(fill="x", padx=12, pady=3)
-            side = "e" if mine else "w"
-            b = tk.Label(row, text=m["text"], justify="left", anchor="w", font=("Segoe UI", 10),
-                         bg=pal["accent"] if mine else pal["friend"], fg=pal["bg"] if mine else pal["fg"],
-                         padx=12, pady=7, wraplength=max(160, int(canvas.winfo_width() * 0.62)))
-            b.pack(anchor=side)
-            if m["at"]:
-                tk.Label(row, text=time.strftime("%H:%M", time.localtime(m["at"])), bg=pal["bg"], fg=pal["muted"],
-                         font=("Segoe UI", 7)).pack(anchor=side, padx=4)
-            bubbles.append(b)
-
-        def show(res, err):
+        def show(res, err, cached=False):
             if not panel.winfo_exists():
                 return
             if err:
                 return info.set(f"Could not load the messages: {err}")
-            self._chat_opened(xuid)
-            for w in inner.winfo_children():
-                w.destroy()
-            bubbles.clear()
-            day = None
-            for m in res["messages"]:
-                d = day_label(m["at"]) if m["at"] else ""
-                if d and d != day:
-                    add_line(d)
-                    day = d
-                add_bubble(m)
-            if not res["messages"]:
-                add_line(f"No messages with {gt} yet. Say ahoy!")
-            n = len(res["messages"])
+            if not cached:
+                self.chat_cache[cache_key] = res
+                self._chat_opened(xuid)
+            msgs = res["messages"]
+            state_.update(conv=res.get("conversation", ""), muted=bool(res.get("muted")),
+                          horizon=max((m.get("id") or "" for m in msgs), key=lambda i: int(i) if i.isdigit() else 0,
+                                      default=""))
+            view.set(msgs, xuid, note="" if msgs else f"No messages with {gt} yet. Say ahoy!")
+            n = sum(1 for m in msgs if not m.get("deleted"))
             info.set((f"{n} message(s)" if n else "no messages yet")
-                     + (" · only the newest (older ones can't be fetched)" if res["more"] else "")
-                     + f" · as {self.xkey.active() or 'your account'}")
-            panel.update_idletasks()
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.yview_moveto(1.0)
+                     + (" · muted" if state_["muted"] else "")
+                     + (" · only the newest" if res.get("more") else "")
+                     + (" · updating..." if cached else f" · as {self.xkey.active() or 'your account'}"))
 
         def load():
             self._xbox_bg(lambda k: social.history(k, xuid), show)
@@ -849,17 +1127,21 @@ class App(SharedListMixin):
                 if on_sent:
                     on_sent()
             self._xbox_bg(lambda k: social.send_message(k, xuid, text), done)
-        send_btn.configure(command=send)
+        send_btn.command = send
         box.bind("<Control-Return>", lambda e: (send(), "break")[1])
-        panel.send, panel.box, panel.info, panel.load = send, box, info, load
-        panel.texts = lambda: [b.cget("text") for b in bubbles]
+        panel.send, panel.box, panel.info, panel.load, panel.texts = send, box, info, load, view.texts
+        panel.view = view
+        panel.delete_message = delete_message                   # for tests
+        if cache_key in self.chat_cache:                        # what we had last time, at once; then fresh
+            show(self.chat_cache[cache_key], None, cached=True)
         load()
         return panel
 
     def inbox_dialog(self, goto=None):
         """Messages: all your Xbox conversations on the left (newest first, unread marked, who is online), the chat
         with the selected one on the right. Typing filters by name; Enter finds anyone on Xbox to start a new chat.
-        Needs an account signed in with Microsoft (OpenXBL's inbox endpoints don't work)."""
+        Right-click a conversation to mute or delete it. Needs an account signed in with Microsoft (OpenXBL's inbox
+        endpoints don't work). The last inbox is shown at once while a fresh one loads."""
         if self.inbox_win is not None and self.inbox_win.winfo_exists():    # one Messages window: bring it up
             w = self.inbox_win
             w.deiconify()
@@ -872,94 +1154,56 @@ class App(SharedListMixin):
         self.inbox_win = win
         win.title("Messages")
         win.configure(bg=P["bg"])
-        head = tk.Frame(win, bg=P["head"])
-        head.pack(fill="x")
-        top = tk.Frame(head, bg=P["head"])
-        top.pack(fill="x", padx=14, pady=(12, 6))
-        tk.Label(top, text="Messages", bg=P["head"], fg=P["fg"], font=("Segoe UI", 14, "bold")).pack(side="left")
-        info = tk.StringVar(value="Loading your inbox...")
-        tk.Label(top, textvariable=info, bg=P["head"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left",
-                                                                                                 padx=(10, 0))
-        ttk.Button(top, text="↻  Refresh", style="Tool.TButton", command=lambda: load()).pack(side="right")
+        key_now = self.xkey.get() or ""
 
         body = tk.Frame(win, bg=P["bg"])
         body.pack(fill="both", expand=True)
-        left = tk.Frame(body, bg=P["panel"], width=330)
+        left = tk.Frame(body, bg=P["panel"], width=340)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
+        top = tk.Frame(left, bg=P["panel"])
+        top.pack(fill="x", padx=14, pady=(14, 2))
+        tk.Label(top, text="Messages", bg=P["panel"], fg=P["fg"], font=("Segoe UI", 15, "bold")).pack(side="left")
+        chat_ui.RoundButton(top, "↻", lambda: load(), P, P["panel"], padx=11).pack(side="right")
+        info = tk.StringVar(value="Loading your inbox...")
+        tk.Label(left, textvariable=info, bg=P["panel"], fg=P["muted"], font=("Segoe UI", 8), anchor="w").pack(
+            fill="x", padx=16)
         query = tk.StringVar()
-        entry = ttk.Entry(left, textvariable=query, font=("Segoe UI", 10))
-        entry.pack(fill="x", padx=10, pady=10)
-        lst = tk.Frame(left, bg=P["panel"])
-        lst.pack(fill="both", expand=True)
-        tv = ttk.Treeview(lst, columns=("when",), show="tree", selectmode="browse", style="Inbox.Treeview")
-        tv.column("#0", width=250)
-        tv.column("when", width=62, anchor="e", stretch=False)
-        tv.tag_configure("unread", foreground=P["fg"], font=("Segoe UI", 9, "bold"))
-        tv.tag_configure("read", foreground=P["fg"])
-        tv.tag_configure("preview", foreground=P["muted"], font=("Segoe UI", 8))
-        tv.tag_configure("section", foreground=P["muted"], font=("Segoe UI", 8, "bold"))
-        sb = ttk.Scrollbar(lst, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        tv.pack(side="left", fill="both", expand=True)
-        right = tk.Frame(body, bg=P["bg"])
-        right.pack(side="left", fill="both", expand=True)
-        empty = tk.Label(right, text="Pick a conversation", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 11))
-        empty.pack(expand=True)
 
-        chats, rows, state = [], {}, {"results": None, "term": "", "placeholder": False, "panel": None,
-                                      "open": None, "goto": goto}
+        def make_entry(parent_, bg):
+            return tk.Entry(parent_, textvariable=query, bg=bg, fg=P["fg"], insertbackground=P["fg"], relief="flat",
+                            bd=0, font=("Segoe UI", 10), highlightthickness=0)
+        sbox = chat_ui.RoundBox(left, P, P["panel"], make_entry, height=38, radius=19)
+        sbox.pack(fill="x", padx=12, pady=(10, 8))
+        entry = sbox.inner
+
+        chats, state = [], {"results": None, "term": "", "placeholder": False, "panel": None, "open": None,
+                            "goto": goto}
         hint = "Search chats, or Enter to find anyone on Xbox"
 
-        def typed():
-            return "" if state["placeholder"] else query.get().strip()
+        def row_menu(c, e):
+            name = c["gamertag"] if not str(c["gamertag"]).isdigit() else "this player"
+            m = self._menu(win)
+            ok = "normal" if c.get("conversation") else "disabled"
+            m.add_command(label="Unmute chat" if c.get("muted") else "Mute chat", state=ok,
+                          command=lambda: self._mute_chat(name, c["conversation"], not c.get("muted"), after=load))
+            m.add_command(label="Delete chat...", state="normal" if c.get("horizon") else "disabled",
+                          command=lambda: setattr(win, "confirm", self._delete_chat(
+                              body, name, c["conversation"], c["horizon"], after=deleted(c))))
+            m.add_separator()
+            m.add_command(label="SOTREP", command=lambda: webbrowser.open(sotrep.profile_url(c["gamertag"])),
+                          state="disabled" if str(c["gamertag"]).isdigit() else "normal")
+            m.add_command(label="Xbox profile", command=lambda: self.open_xbox_profile(c["gamertag"], c["xuid"]))
+            m.tk_popup(e.x_root, e.y_root)
 
-        def when(ts):
-            if not ts:
-                return ""
-            d, now = time.localtime(ts), time.localtime()
-            if d[:3] == now[:3]:
-                return time.strftime("%H:%M", d)
-            if time.time() - ts < 6 * 86400:
-                return time.strftime("%a", d)
-            return time.strftime("%d %b" + (" %Y" if d.tm_year != now.tm_year else ""), d)
-
-        def add_chat(c):
-            online = c.get("state", "").casefold() == "online"
-            name = c["gamertag"] if not c["gamertag"].isdigit() else f"Unknown player ({c['gamertag']})"
-            iid = tv.insert("", "end", text=("●  " if online else "    ") + name, values=(when(c.get("at")),),
-                            tags=("unread" if c.get("unread") else "read",), open=True)
-            preview = (("You: " if c.get("mine") else "") + (c.get("preview") or "")).replace("\n", " ")
-            if preview:
-                tv.insert(iid, "end", text="     " + preview[:46] + ("…" if len(preview) > 46 else ""),
-                          tags=("preview",))
-            rows[iid] = c
-
-        def render():
-            tv.delete(*tv.get_children())
-            rows.clear()
-            q = " ".join(typed().casefold().split())
-            shown = [c for c in chats if not q or q in c["gamertag"].casefold()]
-            for c in shown:
-                add_chat(c)
-            if state["results"] is not None:
-                tv.insert("", "end", text=f"NEW CHAT — \"{state['term']}\"", tags=("section",))
-                have = {c["xuid"] for c in chats}
-                extra = [dict(r, preview="", at=None, mine=False, unread=False) for r in state["results"]
-                         if r["xuid"] not in have]
-                for c in extra:
-                    add_chat(c)
-                if not extra:
-                    tv.insert("", "end", text="    nobody else found", tags=("preview",))
-            elif q and not shown:
-                tv.insert("", "end", text="    no chat matches: Enter searches Xbox", tags=("preview",))
-            if state["open"]:                                  # keep the open conversation selected
-                for iid, c in rows.items():
-                    if c["xuid"] == state["open"]:
-                        tv.selection_set(iid)
-                        tv.see(iid)
-                        break
+        def deleted(c):
+            def after():
+                if state["open"] == c["xuid"] and state["panel"] is not None:
+                    state["panel"].destroy()
+                    state["panel"], state["open"], win.panel = None, None, None
+                    empty.pack(expand=True)
+                load()
+            return after
 
         def open_chat(c):
             if state["open"] == c["xuid"] and state["panel"] is not None:
@@ -968,22 +1212,39 @@ class App(SharedListMixin):
                 state["panel"].destroy()
             empty.pack_forget()
             state["open"] = c["xuid"]
-            name = c["gamertag"] if not c["gamertag"].isdigit() else "Unknown player"
-            state["panel"] = self._chat_panel(right, name, c["xuid"], on_sent=load)
+            name = c["gamertag"] if not str(c["gamertag"]).isdigit() else "Unknown player"
+            state["panel"] = self._chat_panel(right, name, c["xuid"], on_sent=load, on_changed=load,
+                                              pic=c.get("pic", ""))
             state["panel"].pack(fill="both", expand=True)
             win.panel = state["panel"]
 
-        def on_select(_=None):
-            sel = tv.selection()
-            if not sel:
-                return
-            iid = sel[0]
-            if iid not in rows:                                # a preview line: open its conversation
-                iid = tv.parent(iid)
-            if iid in rows:
-                open_chat(rows[iid])
+        lst = chat_ui.ConversationList(left, P, on_select=open_chat, on_menu=row_menu, pictures=self.pictures)
+        lst.pack(fill="both", expand=True, pady=(0, 6))
+        right = tk.Frame(body, bg=P["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        empty = tk.Label(right, text="Pick a conversation", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 11))
+        empty.pack(expand=True)
 
-        tv.bind("<<TreeviewSelect>>", on_select)
+        def typed():
+            return "" if state["placeholder"] else query.get().strip()
+
+        def shown_rows():
+            q = " ".join(typed().casefold().split())
+            shown = [c for c in chats if not q or q in str(c["gamertag"]).casefold()]
+            rows = [dict(c, kind="chat") for c in shown]
+            if state["results"] is not None:
+                rows.append({"kind": "header", "text": f"NEW CHAT — \"{state['term']}\""})
+                have = {c["xuid"] for c in chats}
+                extra = [dict(r, kind="chat", preview="", at=None, mine=False, unread=False) for r in state["results"]
+                         if r["xuid"] not in have]
+                rows += extra or [{"kind": "note", "text": "nobody else found"}]
+            elif q and not shown:
+                rows.append({"kind": "note", "text": "no chat matches: Enter searches Xbox"})
+            return rows
+
+        def render():
+            lst.selected = state["open"]
+            lst.set(shown_rows())
 
         def on_type(*_):
             if state["placeholder"]:
@@ -1014,36 +1275,33 @@ class App(SharedListMixin):
         def placeholder(on):                                   # grey hint text while the box is empty
             if on and not query.get():
                 state["placeholder"] = True
-                entry.configure(foreground=P["muted"])
+                entry.configure(fg=P["muted"])
                 query.set(hint)
             elif not on and state["placeholder"]:
                 query.set("")
                 state["placeholder"] = False
-                entry.configure(foreground=P["fg"])
-        entry.bind("<FocusIn>", lambda e: placeholder(False))
-        entry.bind("<FocusOut>", lambda e: placeholder(True))
+                entry.configure(fg=P["fg"])
+        entry.bind("<FocusIn>", lambda e: placeholder(False), add="+")
+        entry.bind("<FocusOut>", lambda e: placeholder(True), add="+")
 
-        def summary():
-            unread = sum(1 for c in chats if c.get("unread"))
+        def summary(extra=""):
+            unread = sum(1 for c in chats if c.get("unread") and not c.get("muted"))
             info.set(f"{len(chats)} conversations" + (f" · {unread} unread" if unread else "")
-                     + f" · {self.xkey.active() or ''}")
+                     + f" · {self.xkey.active() or ''}" + extra)
 
-        def show(res, err):
+        def show(res, err, cached=False):
             if not win.winfo_exists():
                 return
             if err:
                 return info.set(err)
+            if not cached:
+                self.inbox_cache[key_now] = res
             chats[:] = res["chats"]
-            summary()
-            if res["groups"]:
-                info.set(info.get() + f" · {res['groups']} group chat(s) not shown")
+            summary((f" · {res['groups']} group chat(s) not shown" if res["groups"] else "")
+                    + (" · updating..." if cached else ""))
             render()
-            if state["goto"]:                                  # opened from a pop-up: show that chat
-                for iid, c in rows.items():
-                    if c["xuid"] == state["goto"]:
-                        tv.selection_set(iid)
-                        tv.see(iid)
-                        break
+            if state["goto"] and not cached:                    # opened from a pop-up: show that chat
+                lst.select(state["goto"])
                 state["goto"] = None
 
         def load():
@@ -1054,11 +1312,23 @@ class App(SharedListMixin):
             load()
         win.goto = goto_chat
         placeholder(True)
-        win.inbox_tv, win.info, win.query, win.search, win.entry = tv, info, query, search, entry   # for tests
-        win.rows = lambda: [(tv.item(i, "text").strip(" ●"), tv.item(i, "values")[0]) for i in rows]
-        win.open = lambda gt: [tv.selection_set(i) for i, c in rows.items() if c["gamertag"] == gt]
+        win.info, win.query, win.search, win.entry, win.list = info, query, search, entry, lst   # for tests
+        win.row_menu, win.confirm = row_menu, None
+
+        def rows():
+            out = []
+            for r in lst.rows:
+                if r.get("kind", "chat") == "chat":
+                    name = r["gamertag"] if not str(r["gamertag"]).isdigit() else f"Unknown player ({r['gamertag']})"
+                    out.append((name + ("  · muted" if r.get("muted") else ""), chat_ui.when_label(r.get("at"))))
+            return out
+        win.rows = rows
+        win.open = lambda gt: [lst.select(r["xuid"]) for r in list(lst.rows)
+                               if r.get("kind", "chat") == "chat" and r["gamertag"] == gt]
         win.panel = None
-        self._place_dialog(win, 1000, 660)
+        self._place_dialog(win, 1060, 700)
+        if key_now in self.inbox_cache:                         # the last inbox at once; then the fresh one
+            show(self.inbox_cache[key_now], None, cached=True)
         load()
         return win
 
@@ -2128,6 +2398,46 @@ class App(SharedListMixin):
     def _refresh_accounts(self):
         self.acct_box.configure(values=self.xkey.names())
         self.acct_var.set(self.xkey.active() or "(none: add an account)")
+        self.root.after(1500, self._account_pictures_round)
+
+    ACCOUNT_PIC = 32
+
+    def _account_image(self, name):
+        """The small round picture of one of your own accounts (None until it is known and loaded)."""
+        raw = self.db.get_setting("account_pic:" + str(name), "")
+        if not raw:
+            return None
+        return self.pictures.get(raw, lambda: self.acct_box._sync() if self.acct_box.winfo_exists() else None,
+                                 size=self.ACCOUNT_PIC)
+
+    def _account_pictures_round(self):
+        """Ask Xbox once a day per account for that account's own picture (one request each, in the background)."""
+        if getattr(self, "_acct_pics_busy", False) or self.closing:
+            return
+        now = int(time.time())
+        todo = [(n, self.xkey.get(n)) for n in self.xkey.names()
+                if now - int(self.db.get_setting("account_pic_at:" + n, "0") or 0) > 86400]
+        if not todo:
+            return
+        self._acct_pics_busy = True
+
+        def work():
+            found = {}
+            for name, key in todo:
+                try:
+                    found[name] = self.fetch_account_picture(key)
+                except Exception:                        # never let a worker thread die silently; retry tomorrow
+                    found[name] = None
+            self.q.put(("call", lambda: done(found)))
+
+        def done(found):
+            self._acct_pics_busy = False
+            for name, raw in found.items():
+                if raw is not None:
+                    self.db.set_setting("account_pic:" + name, raw)
+                    self.db.set_setting("account_pic_at:" + name, str(now))
+            self.acct_box._sync()
+        threading.Thread(target=work, daemon=True).start()
 
     def switch_account(self):
         self.xkey.set_active(self.acct_var.get())
@@ -2222,8 +2532,8 @@ class App(SharedListMixin):
 
     def _update_msg_button(self):
         n = len(self.msg_unread)
-        self.msg_btn.configure(text=f"Messages ({n})" if n else "Messages",
-                               style="Accent.TButton" if n else "Tool.TButton")
+        self.msg_btn.set_text(f"Messages ({n})" if n else "Messages")
+        self.msg_btn.set_kind("accent" if n else "soft")
 
     def _message_popup(self, new):
         if len(new) == 1:
@@ -2392,6 +2702,8 @@ class App(SharedListMixin):
             self.set_status(f"Refresh failed (existing data kept): {msg}", error=True)
         self.reload(to_top=self.to_top_after_sync)
         self.to_top_after_sync = False
+        if out.ok and not imported:
+            self._profiles_round(force=True)
 
     def _poll(self):
         try:

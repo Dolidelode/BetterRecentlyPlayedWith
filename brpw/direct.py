@@ -84,7 +84,7 @@ def flatten_recent(payload: dict) -> list:
         t = next((t for t in titles if SOT in str(t.get("titleName", "")).casefold()), titles[0] if titles else {})
         out.append({"xuid": str(p["xuid"]), "gamertag": p.get("gamertag") or p.get("modernGamertag") or "",
                     "titleName": t.get("titleName"), "titleId": t.get("titleId"),
-                    "timestamp": t.get("lastPlayedWithDateTime")})
+                    "timestamp": t.get("lastPlayedWithDateTime"), "displayPicRaw": p.get("displayPicRaw")})
     return out
 
 
@@ -120,7 +120,8 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
         term = path.split("/", 1)[1]
         return {"content": _request("GET", f"{PEOPLEHUB}/search?q={urllib.parse.quote(term)}&maxItems=15", auth, "5")}
     if m == "GET" and path == "account":
-        return {"content": _request("GET", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag",
+        return {"content": _request("GET", "https://profile.xboxlive.com/users/me/profile/settings"
+                                    "?settings=Gamertag,GameDisplayPicRaw",
                                     auth, "2")}
     if m in ("PUT", "DELETE") and re.fullmatch(r"friends/\d+", path):
         target = path.split("/")[1]
@@ -140,5 +141,20 @@ def call(method: str, url: str, key: str, data: Optional[dict] = None) -> dict:
             raise ProviderError("No XUID for the message.")
         _request("POST", f"https://msg.xboxlive.com/users/xuid({tok['xuid']})/outbox", auth, "3",
                  {"header": {"recipients": [{"xuid": int(x)}]}, "messageText": str(data.get("message") or "")})
+        return {}
+    if m == "POST" and path == "stats/sot-minutes" and isinstance(data, dict):
+        xuids = [str(x) for x in data.get("xuids") or [] if str(x).isdigit()]
+        return {"content": _request("POST", "https://userstats.xboxlive.com/batch", auth, "2",
+                                    {"arrangebyfield": "xuid", "xuids": xuids,
+                                     "stats": [{"name": "MinutesPlayed", "titleid": "1717113201"}]})}
+    # conversation actions; mute and message delete found by trying them on the user's own chats (2026-11-23)
+    if m in ("PUT", "DELETE") and re.fullmatch(r"conversations/[A-Za-z0-9-]+/mute", path):
+        _request(m, f"{MESSAGING}/{path}", auth, "1")
+        return {}
+    if m == "DELETE" and re.fullmatch(r"conversations/[A-Za-z0-9-]+/messages/\d+", path):
+        _request("DELETE", f"{MESSAGING}/{path}", auth, "1")
+        return {}
+    if m == "PUT" and path == "conversations/horizon" and isinstance(data, dict):     # as xbox-webapi-python does
+        _request("PUT", f"{MESSAGING}/conversations/horizon", auth, "2", data)
         return {}
     raise ProviderError(f"'{path}' isn't available with Microsoft sign-in yet.")

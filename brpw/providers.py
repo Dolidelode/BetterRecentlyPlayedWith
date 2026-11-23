@@ -204,7 +204,8 @@ def parse_openxbl(payload: dict) -> List[Player]:
             continue
         if has_titles and "sea of thieves" not in str(i.get("titleName", "")).casefold():
             continue
-        out.append(Player(str(i.get("gamertag") or ""), _xuid(i.get("xuid")), _iso_to_epoch(i.get("timestamp"))))
+        out.append(Player(str(i.get("gamertag") or ""), _xuid(i.get("xuid")), _iso_to_epoch(i.get("timestamp")),
+                          str(i.get("displayPicRaw") or "") or None))
     return out
 
 
@@ -219,6 +220,21 @@ def parse_account_gamertag(payload) -> Optional[str]:
     except (KeyError, IndexError, TypeError, AttributeError):
         pass
     return None
+
+
+def parse_account_picture(payload) -> str:
+    try:
+        for s in payload["content"]["profileUsers"][0]["settings"]:
+            if s.get("id") == "GameDisplayPicRaw" and s.get("value"):
+                return str(s["value"])
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
+    return ""
+
+
+def account_picture(key: str, http=openxbl_json) -> str:
+    """The signed-in account's own profile picture address ("" when Xbox doesn't give one)."""
+    return parse_account_picture(http(OPENXBL_ACCOUNT_URL, None, {"X-Authorization": key.strip()}))
 
 
 def lookup_gamertag(key: str, http=openxbl_json) -> Optional[str]:
@@ -287,9 +303,11 @@ class OpenXblKey:
     def active(self) -> Optional[str]:
         return self._data["active"] if self._data["active"] in self.names() else None
 
-    def get(self) -> str:
+    def get(self, name: Optional[str] = None) -> str:
+        """The key of the account called name, or of the active account."""
+        want = self.active() if name is None else name
         for a in self._data["accounts"]:
-            if a["name"] == self.active():
+            if a["name"] == want:
                 return a["key"]
         return ""
 

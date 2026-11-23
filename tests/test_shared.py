@@ -212,14 +212,8 @@ def test_shared_ui_send_review_approve(tmp_path, monkeypatch):
     import time as _t
     import tkinter as tk
     from brpw import ui
-    for attempt in range(5):        # a second Tk in one process sometimes fails to find init.tcl on Windows
-        try:
-            root = tk.Tk()
-            break
-        except tk.TclError as e:
-            if attempt == 4:
-                pytest.skip(f"no display available: {e}")
-            _t.sleep(0.2)
+    from conftest import new_root
+    root = new_root()
     root.withdraw()
     monkeypatch.setenv("BRPW_DATA_DIR", str(tmp_path))
     d = Database(tmp_path / "u.db")

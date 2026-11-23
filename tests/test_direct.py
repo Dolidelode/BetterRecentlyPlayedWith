@@ -79,7 +79,7 @@ def test_every_openxbl_address_maps_to_the_xbox_service(routed):
         ("GET", "https://peoplehub.xboxlive.com/users/me/people/xuids(1,2)/decoration/"
                 "detail,presenceDetail,multiplayerSummary", "5"),
         ("GET", "https://userpresence.xboxlive.com/users/xuid(1)?level=all", "3"),
-        ("GET", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag", "2")]
+        ("GET", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,GameDisplayPicRaw", "2")]
     assert seen[3][3] == {"header": {"recipients": [{"xuid": 123}]}, "messageText": "ahoy"}
     with pytest.raises(ProviderError):
         providers.openxbl_json("https://api.xbl.io/v2/clubs", None, {"X-Authorization": key})
@@ -213,3 +213,49 @@ def test_own_presence_goes_to_userpresence_me(routed):
     seen, _ = routed
     social.openxbl_call("GET", social.API + "presence", msauth.MARK + XUID)
     assert seen[-1][:3] == ("GET", "https://userpresence.xboxlive.com/users/me?level=all", "3")
+
+
+def _id_token(claims):
+    import base64
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return "head." + body + ".sig"
+
+
+def test_the_email_comes_from_a_new_sign_in_and_is_saved_encrypted(tmp_path):
+    assert msauth.email_from({"id_token": _id_token({"email": "pirate@example.com"})}) == "pirate@example.com"
+    assert msauth.email_from({"id_token": _id_token({"preferred_username": "p@example.com"})}) == "p@example.com"
+    assert msauth.email_from({}) == "" and msauth.email_from({"id_token": "garbage"}) == ""
+    tokens = FakeTokens()
+    accs = msauth.MsAccounts(tmp_path / "ms.json", http=tokens, protect_fn=fake_protect, unprotect_fn=fake_unprotect)
+    accs.add_from_ms_token({"access_token": "access0", "refresh_token": "refresh0",
+                            "id_token": _id_token({"email": "pirate@example.com"})})
+    assert accs.email(XUID) == "pirate@example.com"
+    assert "pirate@example.com" not in (tmp_path / "ms.json").read_text(encoding="utf-8")       # encrypted on disk
+    assert accs.email("nobody") == ""
+    accs.cache[XUID]["expires"] = 0
+    accs.auth(XUID)                                     # a refresh keeps the old scope (more fails for old sign-ins)
+    refresh = [body for url, body in tokens.calls if body.get("grant_type") == "refresh_token"][-1]
+    assert refresh["scope"] == msauth.REFRESH_SCOPE and "email" not in refresh["scope"]
+    assert "openid email" in msauth.SCOPE                                    # a new sign-in asks for the email
+
+
+def test_conversation_actions_map_to_xbox_messaging(routed):
+    seen, _ = routed
+    key = msauth.MARK + XUID
+    social.mute_chat(key, "c-1", True)
+    social.mute_chat(key, "c-1", False)
+    social.delete_message(key, "c-1", "55")
+    social.delete_chat(key, "c-1", "55")
+    M = "https://xblmessaging.xboxlive.com/network/Xbox/users/me/conversations/"
+    assert [(m, u, v) for m, u, v, d in seen] == [
+        ("PUT", M + "c-1/mute", "1"), ("DELETE", M + "c-1/mute", "1"), ("DELETE", M + "c-1/messages/55", "1"),
+        ("PUT", M + "horizon", "2")]
+
+
+def test_hours_played_go_to_xbox_userstats(routed):
+    seen, _ = routed
+    social.sot_minutes(msauth.MARK + XUID, ["5", "6"])
+    m, u, v, d = seen[-1]
+    assert (m, u, v) == ("POST", "https://userstats.xboxlive.com/batch", "2")
+    assert d == {"arrangebyfield": "xuid", "xuids": ["5", "6"],
+                 "stats": [{"name": "MinutesPlayed", "titleid": "1717113201"}]}
