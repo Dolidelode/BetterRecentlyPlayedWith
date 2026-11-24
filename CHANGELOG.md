@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 — 2026-11-25
+**Fixed (Linux)**
+- Signing in failed with `CERTIFICATE_VERIFY_FAILED`, and so did every other connection: the Linux programs looked for trusted certificates where the build machine keeps them. They now use your system's own list (or `SSL_CERT_FILE` when you set it).
+- The browser didn't open for the sign-in (or for Twitch and SOTREP links); instead `/bin/sh` crashed with `symbol lookup error` on newer distributions like Arch. Programs started by the app no longer pick up the libraries bundled inside it.
+
 ## 0.4.0 — 2026-11-24
 **New**
 - **Linux version** (`BetterRecentlyPlayedWith-linux`): the same app on Linux. Finds Sea of Thieves running through Steam's Proton, scrolls with the mouse wheel (X11 and XWayland), keeps data in `~/.local/share/BetterRecentlyPlayedWith` (or `$XDG_DATA_HOME`). The Microsoft sign-in is kept in a file only your user can read (Windows encrypts it per Windows user instead); updates are offered as a link to the release page; the Xbox app / Game Bar account switch is Windows-only.

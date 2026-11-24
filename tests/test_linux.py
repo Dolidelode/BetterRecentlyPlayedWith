@@ -63,3 +63,20 @@ def test_mouse_wheel_on_linux_scrolls_too():
     assert got == [120, -120]
     w.binds["<Leave>"](None)
     assert not w.alls
+
+
+def test_linux_bundle_uses_system_certificates_and_original_libraries():
+    from brpw import fix_linux_bundle
+    env = {"LD_LIBRARY_PATH": "/tmp/_MEI123", "LD_LIBRARY_PATH_ORIG": "/opt/mine"}
+    fix_linux_bundle(env, frozen=True, platform="linux", exists=lambda f: f == "/etc/pki/tls/certs/ca-bundle.crt")
+    assert env["SSL_CERT_FILE"] == "/etc/pki/tls/certs/ca-bundle.crt"
+    assert env["LD_LIBRARY_PATH"] == "/opt/mine"
+
+    env = {"LD_LIBRARY_PATH": "/tmp/_MEI123", "SSL_CERT_FILE": "/my/certs.pem"}
+    fix_linux_bundle(env, frozen=True, platform="linux", exists=lambda f: True)
+    assert env == {"SSL_CERT_FILE": "/my/certs.pem"}          # the user's own choice stays; no bundle path leaks
+
+    env = {"LD_LIBRARY_PATH": "/x"}
+    fix_linux_bundle(env, frozen=False, platform="linux", exists=lambda f: True)
+    fix_linux_bundle(env, frozen=True, platform="win32", exists=lambda f: True)
+    assert env == {"LD_LIBRARY_PATH": "/x"}                   # from source, and on Windows: untouched

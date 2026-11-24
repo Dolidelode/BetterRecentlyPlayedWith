@@ -1,15 +1,8 @@
-## What's new in 0.4.0
+## What's new in 0.4.1
 
-**Linux.** `BetterRecentlyPlayedWith-linux` is the same app for Linux (`chmod +x`, then run it). It finds Sea of Thieves running through Steam's Proton, scrolls with the mouse wheel and keeps its data in `~/.local/share/BetterRecentlyPlayedWith`. On Linux the Microsoft sign-in is kept in a file only your user can read, updates are offered as a link to this page, and the Xbox app / Game Bar account switch isn't there.
+A fix for the Linux programs (`BetterRecentlyPlayedWith-linux` and `brpw-cli-linux`); Windows is unchanged.
 
-**Terminal version.** `brpw-cli.exe` (Windows) and `brpw-cli-linux`: your recently-played list with Twitch channels (yours and the shared master list) and SOTREP links, your accounts, and Discord, in cmd, PowerShell, Windows Terminal or a Linux terminal.
-- Double-click `brpw-cli.exe` for a menu that stays open; the first time, a short setup adds your account.
-- `brpw-cli help` lists every command; `brpw-cli watch` keeps refreshing; `--json` for scripts.
-- The window opens big enough for the list, and the list fits any width (links never get cut off).
-- It shares accounts and history with the app.
+- **Signing in works on Linux.** It failed with `CERTIFICATE_VERIFY_FAILED` (and so did every other connection): the programs looked for trusted certificates where the build machine keeps them. They now use your system's own list, or `SSL_CERT_FILE` if you set it.
+- **The browser opens again.** On newer distributions such as Arch, opening the sign-in page or a link crashed `/bin/sh` with `symbol lookup error`, because it picked up libraries bundled inside the program. Programs the app starts now use your system's own libraries.
 
-**Discord.** ☰ → Discord... (or `brpw-cli discord set URL`): paste a webhook address and your list is posted to that channel, each player linked to SOTREP with hours and Twitch (🔴 LIVE). One message is kept up to date instead of a new one each time, nothing is sent when the list hasn't changed, and a gamertag can never ping anyone. Post by hand or after every refresh.
-
-**Fixes.** Closing the app while an extra tab (like Discord) was open could show an error.
-
-Your data and settings carry over; nothing needs to be set up again. The full history of changes is in CHANGELOG.md.
+Download the new Linux file(s) and replace the old ones; your data and settings carry over. The full history of changes is in CHANGELOG.md.

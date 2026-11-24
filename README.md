@@ -4,7 +4,7 @@ A small app for **Windows and Linux** that keeps a local history of your Xbox **
 opens their [SOTREP](https://www.sotrep.com/) page with one click, plus a **terminal version** and posting the list to
 **Discord**. No server, no installer, no Python needed.
 
-> **Status: early (v0.4.0).** Read "What works and what doesn't" before relying on it. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+> **Status: early (v0.4.1).** Read "What works and what doesn't" before relying on it. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## What works and what doesn't
 | Feature | State |
