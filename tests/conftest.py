@@ -26,6 +26,7 @@ def _no_background_profile_requests(monkeypatch):
     monkeypatch.setattr(ui.App, "fetch_minutes", staticmethod(lambda key, xuids: {}))
     monkeypatch.setattr(ui.App, "fetch_account_picture", staticmethod(lambda key: ""))
     monkeypatch.setattr(ui.App, "fetch_crew", staticmethod(lambda key: None))
+    monkeypatch.setattr(ui.App, "fetch_discord", staticmethod(lambda cfg, account, players, force: "unchanged"))
 
 
 def new_root():

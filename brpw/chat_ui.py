@@ -28,6 +28,26 @@ def round_rect(c: tk.Canvas, x1, y1, x2, y2, r, **kw):
 AVATAR_COLORS = ("#e0794c", "#d6a13b", "#5fb36b", "#3aa7a3", "#4f8fdc", "#8a6fd8", "#c763a8", "#d65c5c")
 
 
+class _Wheel:
+    def __init__(self, e, delta):
+        self.x, self.y, self.widget, self.delta = e.x, e.y, e.widget, delta
+
+
+def wheel(widget, handler):
+    """Scroll with the mouse wheel while the pointer is over widget. Windows and macOS send <MouseWheel>; Linux
+    (X11) sends Button-4 (up) and Button-5 (down) instead, turned here into the same delta."""
+    def on(_):
+        widget.bind_all("<MouseWheel>", handler)
+        widget.bind_all("<Button-4>", lambda e: handler(_Wheel(e, 120)))
+        widget.bind_all("<Button-5>", lambda e: handler(_Wheel(e, -120)))
+
+    def off(_):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.unbind_all(seq)
+    widget.bind("<Enter>", on, add="+")
+    widget.bind("<Leave>", off, add="+")
+
+
 def friend_shade(colour: str) -> str:
     """A friend's card: the normal card colour, slightly darker (no separate colour)."""
     return _mix(colour, "#000000", 0.22)
@@ -528,8 +548,7 @@ class ChatView(tk.Frame):
         self.day_font = tkfont.Font(family="Segoe UI", size=8, weight="bold")
         self.messages, self.other, self.note, self._width, self._job = [], "", "", 0, None
         self.canvas.bind("<Configure>", self._resized)
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        wheel(self.canvas, self._wheel)
 
     def _wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
@@ -636,8 +655,7 @@ class ConversationList(tk.Frame):
         self.canvas.bind("<Leave>", lambda e: self._set_hover(None))
         self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<Button-3>", self._right)
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"), add="+")
+        wheel(self.canvas, self._wheel)
 
     def _wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
@@ -803,8 +821,7 @@ class PlayerCards(tk.Frame):
         c.bind("<Button-1>", self._press)
         c.bind("<Motion>", self._motion)
         c.bind("<Leave>", lambda e: self._set_hover(None))
-        c.bind("<Enter>", lambda e: c.bind_all("<MouseWheel>", self._wheel))
-        c.bind("<Leave>", lambda e: c.unbind_all("<MouseWheel>"), add="+")
+        wheel(c, self._wheel)
         c.bind("<Up>", lambda e: self._step(-1, e))
         c.bind("<Down>", lambda e: self._step(1, e))
 
@@ -1258,8 +1275,7 @@ class CardList(tk.Frame):
         c.bind("<Motion>", lambda e: self._set_hover(self._at(e.y)))
         c.bind("<Leave>", lambda e: self._set_hover(None))
         c.bind("<Button-1>", self._click)
-        c.bind("<Enter>", lambda e: c.bind_all("<MouseWheel>", self._wheel))
-        c.bind("<Leave>", lambda e: c.unbind_all("<MouseWheel>"), add="+")
+        wheel(c, self._wheel)
 
     # ---- the Treeview-like part
     def insert(self, parent, index, iid=None, values=(), tags=(), **kw):

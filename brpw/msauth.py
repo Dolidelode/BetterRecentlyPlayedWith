@@ -16,6 +16,7 @@ import http.server
 import json
 import os
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -71,11 +72,20 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
         ctypes.windll.kernel32.LocalFree(out.pbData)
 
 
+PLAIN = "file-only:"              # Linux/macOS: no DPAPI; the file itself is readable by your user only (0600)
+
+
 def protect(text: str) -> str:
+    if sys.platform != "win32":
+        return PLAIN + base64.b64encode(text.encode("utf-8")).decode("ascii")
     return base64.b64encode(_dpapi(text.encode("utf-8"), True)).decode("ascii")
 
 
 def unprotect(blob: str) -> str:
+    if blob.startswith(PLAIN):
+        return base64.b64decode(blob[len(PLAIN):]).decode("utf-8")
+    if sys.platform != "win32":
+        raise OSError("This sign-in was saved encrypted on Windows; sign in again here.")
     return _dpapi(base64.b64decode(blob), False).decode("utf-8")
 
 
@@ -212,6 +222,10 @@ class MsAccounts:
     def _save(self, d: dict) -> None:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)                         # only your user can read it (Linux/macOS)
+        except OSError:
+            pass
         os.replace(tmp, self.path)
 
     def xuids(self) -> List[str]:

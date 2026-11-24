@@ -1,9 +1,10 @@
 # Better Recently Played With
 
-A small Windows app that keeps a local history of your Xbox **Recently played with** players and opens
-their [SOTREP](https://www.sotrep.com/) page with one click. No server, no installer, no Python needed.
+A small app for **Windows and Linux** that keeps a local history of your Xbox **Recently played with** players and
+opens their [SOTREP](https://www.sotrep.com/) page with one click, plus a **terminal version** and posting the list to
+**Discord**. No server, no installer, no Python needed.
 
-> **Status: early (v0.3.0).** Read "What works and what doesn't" before relying on it.
+> **Status: early (v0.4.0).** Read "What works and what doesn't" before relying on it. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## What works and what doesn't
 | Feature | State |
@@ -24,16 +25,67 @@ their [SOTREP](https://www.sotrep.com/) page with one click. No server, no insta
 | **List views** | **View** (Players tab, or ☰ → List view): **Cards** (picture, name and a line of details), **Compact** (one line per player with a small picture) or **Rows** (thin rows without pictures, the most players on screen); remembered. **Hide search and sort** in the same menu gives the list all the room; **Ctrl+F** (or ☰ → List view → Show search and sort) brings them back |
 | **Friends & messages** | **Friends & messages** (tab, opens on **Friends**) has three parts: **Chats**, **Friends** and **Requests**; whatever you pick on the left opens on the right; drag the line between them for a slim or wide list (remembered). **Chats**: all your Xbox conversations, newest first, each with the player's Xbox profile picture (round; a coloured letter until it has loaded), the last message, the time, **bold with a dot for unread** and a green dot for who is online; the chat opens on the right as rounded bubbles, with **Xbox profile**, **SOTREP** and **⋯** (mute/unmute, delete chat, copy gamertag) at the top. Right-click a conversation to mute, unmute or delete it; right-click a message to copy it or delete your own. Deleting asks first, inside the window. A message its sender deleted shows as "Message deleted" (Xbox keeps only that, not the text). The last inbox and chats show at once when you open them again while fresh ones load. Chats you muted on Xbox stay listed (greyed, "muted") but never pop up or count. Mute and delete use the requests the Xbox app uses (not documented by Microsoft); mute was tested on a real chat, deleting a message on a test message, deleting a chat not yet for real. Typing filters the tab by name, Enter finds anyone on Xbox to start a new chat or add them. **Friends**: online first, with what each is doing or when they were last seen and ★ for favourites; click one to chat, right-click for Xbox profile, SOTREP or Remove friend (asks first, inside the window). **Requests**: friend requests waiting for you (with a red dot on the tab) and the ones you sent. Pick one for a card with **Accept** and **Ignore** (or **Cancel request** for one you sent); nothing happens until you click. Accepting opens the chat with your new friend. A **new friend request pops up** too (checked every 3 minutes with the messages) and counts on the button. Requests need Microsoft sign-in (OpenXBL has none); they use the requests the Xbox app uses (not documented by Microsoft): the list and **Accept** were tested with a real request between two accounts; **Ignore** and **Cancel request** so far only against a fake server. A **new message pops up** at the bottom right of the screen (click it to open that chat) and **Friends & messages** shows how many unread chats and friend requests are waiting; checked once a minute, can be turned off under **☰ → Pop-up for new Xbox messages**. Needs an account signed in with Microsoft (OpenXBL's inbox doesn't work). Group chats aren't shown yet. Tested against a real inbox (45 conversations) |
 | **Xbox friends and messages** | In the main list, right-click a player for **Xbox messages...** (the chat with that player opens as a tab, your history as bubbles), **Xbox profile** (opens the Xbox app, or xbox.com), **SOTREP** and **Add friend / Remove friend** (adding sends a friend request; you're friends once they accept). One request per click, never automatic. **Who is on a ship**: the Friends tab shows it (⚓ on a brigantine · 2/3), from Xbox's documented multiplayer session service (tested on a real account). The app doesn't invite or join: Sea of Thieves ignores join links opened by another program (tried for real with both the Store and the Steam version) and Xbox only lets the game itself send invites, so do that in the game or Game Bar. **☰ → Switch Game Bar to this account** opens the Xbox app, signs it out through its own menu and presses Sign in, so Microsoft's account picker opens, and Game Bar uses the account you end up with. For accounts added with **Sign in with Microsoft** the app also chooses the right email in that picker and presses Continue (accounts added before v0.2.12: sign in once more under **☰ → Add Xbox account...** so the app learns the email; it is stored encrypted, like the sign-in). Otherwise you pick the account yourself. The app never types or sees a password. It works the Xbox app the way a screen reader does (Windows UI Automation): it only clicks when the spot is really the Xbox window and puts your mouse back. If anything is off, it says so and you switch by hand (profile picture → Sign out). (The Xbox app's direct sign-in link left the app stuck on "Launching", so it isn't used.) Messages are at most 250 characters. With **Microsoft sign-in**, sending uses Microsoft's documented Xbox send service and was tested with a real message between two accounts; with an OpenXBL key it goes through OpenXBL (not tested with a real message). Friend list, search, message history and the inbox tested against a real account; with Microsoft sign-in adding a friend (sends a friend request) and removing one were tested for real, with an OpenXBL key only against a fake server |
+| **Discord** | **☰ → Discord...**: paste a webhook address from your server (Server settings → Integrations → Webhooks → New webhook → Copy webhook URL) and **Post now**, or tick **Update Discord after every refresh**. The post lists your recently-played players, each linked to SOTREP, with hours, Friend and their Twitch channel (🔴 LIVE when live); crewmates are left out like in the app. By default **one message is kept up to date** (later posts edit it, so the channel isn't flooded) and nothing is sent when the list hasn't changed. Choose 5–30 players. The address is saved only on your PC (`discord.json`); anyone with it can post in that channel, so keep it private. Mentions are switched off, so a gamertag can never ping anyone. Tested on a real Discord server: the post appeared, and posting again edited that same message |
+| **Terminal version** | `brpw-cli.exe` (Windows) and `brpw-cli-linux` for cmd, PowerShell, Windows Terminal or a Linux terminal: your accounts, the recently-played list with Twitch channels (yours and the shared master list) and SOTREP links, and Discord. Shares the data folder with the app. See **Terminal version** below. Tested on Windows and on Linux (Debian, in a container) |
+| **Linux** | `BetterRecentlyPlayedWith-linux`: the same app on Linux (X11 or Wayland with XWayland). Detects Sea of Thieves running through Steam's Proton. Differences: the Microsoft sign-in is kept in a file only your user can read (Windows encrypts it for your Windows user instead), updates are offered as a link to the release page instead of replacing the program, and the Xbox app / Game Bar account switch isn't there (they don't exist on Linux). Tested in a Debian container with a virtual screen, not yet on a desktop Linux |
 | SOTREP link | A *search* link (`/search/xbox-<gamertag>`). SOTREP offers no way to get a guaranteed profile URL from a gamertag |
 | Updates | Notifies you of a new release. **Update now** downloads it from GitHub, checks it against the release's SHA-256 checksum, swaps the program file and restarts. Nothing installs without your click |
 
 ## Using it
-1. Download `BetterRecentlyPlayedWith.exe` from [Releases](https://github.com/Dolidelode/BetterRecentlyPlayedWith/releases) and run it. (Windows may warn about an unsigned app.)
+1. Download from [Releases](https://github.com/Dolidelode/BetterRecentlyPlayedWith/releases) and run it (Windows may warn about an unsigned app):
+
+   | File | What |
+   |---|---|
+   | `BetterRecentlyPlayedWith.exe` | the app for Windows |
+   | `BetterRecentlyPlayedWith-linux` | the app for Linux (see **Linux** below) |
+   | `brpw-cli.exe` | the terminal version for Windows (double-click for a menu) |
+   | `brpw-cli-linux` | the terminal version for Linux |
+   | `SHA256SUMS.txt` | checksums of the four files |
+
 2. **☰ → Import players...** to paste gamertags, or **☰ → Add Xbox account...** for live sync (below).
 3. Double-click a player to open SOTREP. Right-click a player (or several selected rows) for everything else, for example **Tag...** to label players (for example an alt and its main with the same tag; tags are never added automatically) and **Encounters** for a summary of the selected players (first/last seen, times seen, name changes, friend status, Xbox's "last online" when known) plus every recorded encounter.
 4. Leave it open: it refreshes every 60 s (changeable next to **Auto**, minimum 30 s; set **Auto** to Off any time). **Auto** decides when: *Only while SoT is open* (the game runs on this PC), *While Xbox says I play SoT* (your own Xbox presence, so playing on a **console** counts too; Xbox is asked at most every 2 minutes), *Always* or *Off*. The first round after you stop playing still runs, so the players of your last session are picked up. With *Appear offline* on Xbox, Xbox reports you as offline, so use one of the other choices then.
 
-Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` (`players.db`, `backups\`, `ms_accounts.json`, `openxbl_keys.json`, `pictures\` for saved profile pictures), so updating or moving the exe never touches it.
+Your data lives in `%APPDATA%\BetterRecentlyPlayedWith\` on Windows and `~/.local/share/BetterRecentlyPlayedWith/` on Linux (`players.db`, `backups`, `ms_accounts.json`, `openxbl_keys.json`, `discord.json`, `pictures` for saved profile pictures), so updating or moving the program never touches it.
+
+## Linux
+1. Download `BetterRecentlyPlayedWith-linux` (and `brpw-cli-linux` if you want the terminal version).
+2. Make it runnable and start it: `chmod +x BetterRecentlyPlayedWith-linux && ./BetterRecentlyPlayedWith-linux`. Everything it needs is inside the file (Python and Tk included); it runs on X11 and on Wayland through XWayland, on distributions from about 2022 on (built on Ubuntu 22.04).
+3. **☰ → Add Xbox account... → Sign in with Microsoft** opens your browser; the sign-in comes back to the app by itself.
+
+What's different from Windows:
+- Data lives in `~/.local/share/BetterRecentlyPlayedWith/` (or `$XDG_DATA_HOME`).
+- The Microsoft sign-in is saved in `ms_accounts.json` readable only by your user (Linux has no Windows-style per-user encryption built in); keep that folder private.
+- **Auto: Only while SoT is open** finds Sea of Thieves started through Steam's Proton or Wine.
+- Updates: the app tells you about a new version and opens the release page; download the new file yourself (it doesn't replace itself).
+- **Switch Game Bar to this account** isn't there: the Xbox app and Game Bar exist only on Windows.
+
+## Discord
+Post your recently-played list to a Discord channel, for example for your crew or your stream:
+1. In Discord: the channel's settings (gear) → **Integrations** → **Webhooks** → **New Webhook** → **Copy Webhook URL**. You need permission to manage webhooks on that server.
+2. In the app: **☰ → Discord...**, paste the address, **Save**, then **Post now**. Or in the terminal: `brpw-cli discord set URL` and `brpw-cli discord post`.
+3. Optional: **Update Discord after every refresh** (in the app; `brpw-cli discord auto on` for `brpw-cli watch`).
+
+What the post shows: up to 5–30 players (you choose) in Xbox's order, each gamertag linked to SOTREP, with hours in Sea of Thieves, Friend and their Twitch channel (🔴 LIVE with viewers when live). Crewmates are left out like in the app. One message is kept up to date (later posts edit it; turn that off for a new message each time), and nothing is sent when the list hasn't changed. Mentions are switched off, so no gamertag can ever ping anyone. The webhook address is saved only on your PC in `discord.json`; anyone who has it can post in that channel, so don't share it. **Remove webhook** (or `brpw-cli discord off`) stops all posting.
+
+## Terminal version
+`brpw-cli.exe` (Windows cmd, PowerShell, Windows Terminal) or `brpw-cli-linux` (rename it to `brpw-cli` if you like) from the same release. It uses the same data folder, so accounts added in the app work here too and the other way round. **Double-click** `brpw-cli.exe` for a menu (refresh, keep refreshing, accounts, SOTREP, Discord, help) that stays open until you quit; the first time, a short **setup** adds your account and optionally a Discord webhook. In a terminal, `brpw-cli help` lists every command.
+
+```
+brpw-cli                       refresh from Xbox and show the list (the default; same as: brpw-cli list)
+brpw-cli help                  every command, explained          brpw-cli menu / setup   the menu, first-time setup
+brpw-cli list -n 50 --all      more players, including ones no longer in Xbox's list
+brpw-cli list --no-sync        what's saved, without asking Xbox
+brpw-cli list --json           the list as JSON (for scripts)
+brpw-cli watch -i 60           refresh and show again every 60 s (Ctrl+C stops); --discord also posts changes
+brpw-cli accounts              your accounts (* = active)
+brpw-cli add                   Microsoft sign-in in your browser (prints the address if no browser opens)
+brpw-cli add --key KEY         an OpenXBL key instead
+brpw-cli use NAME              switch account          brpw-cli remove NAME     forget an account (history stays)
+brpw-cli sotrep GAMERTAG       the SOTREP link (--open opens it)
+brpw-cli discord set URL       save a webhook; then: discord post | discord auto on | discord off
+```
+Each line shows the position in Xbox's list, gamertag (green for friends), when you last met, hours in Sea of Thieves, the Twitch channel (●LIVE when live, if Twitch is set up in the app) and the SOTREP link (Ctrl+click opens it in most terminals). `--links` shows clickable names instead of the long links (Windows Terminal and most Linux terminals), `--no-color` plain text. Double-clicked, the console window opens big enough for the list (Windows' classic console; Windows Terminal doesn't let programs resize it), and in any window the list fits itself: when a line would be too wide, the SOTREP link moves to its own line underneath instead of being cut off.
 
 ### Connecting
 **Sign in with Microsoft (recommended)**
@@ -66,14 +118,15 @@ A small icon on a row means Xbox reports that player as broadcasting right now (
 Nine themes (**☰ → Theme**) each pair an icon design with a full colour scheme for the whole window, title bars included (Windows 11); the choice is remembered. The exe file itself always uses the "Deep teal" icon. The artwork was generated with ChatGPT; it is stylised, not an official Sea of Thieves asset, and this project is not affiliated with or endorsed by Rare, Microsoft, Xbox, OpenXBL or SOTREP. If you reuse the icons, check for yourself that you are comfortable with that.
 
 ## Privacy
-Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to Microsoft's sign-in (`login.microsoftonline.com`) and Xbox's own services (`*.xboxlive.com`, including profile pictures from `images-eds-ssl.xboxlive.com`) for accounts signed in with Microsoft, or to `api.xbl.io` for accounts with an OpenXBL key, Twitch (`id.twitch.tv`, `api.twitch.tv`, and profile pictures and live snapshots from `static-cdn.jtvnw.net`) only when you set up Twitch, `api.github.com` and `github.com` (update check, and the download when you click Update now) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. Never post `ms_accounts.json`, `openxbl_keys.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
+Everything stays on your PC in `%APPDATA%\BetterRecentlyPlayedWith\`. The app only talks to Microsoft's sign-in (`login.microsoftonline.com`) and Xbox's own services (`*.xboxlive.com`, including profile pictures from `images-eds-ssl.xboxlive.com`) for accounts signed in with Microsoft, or to `api.xbl.io` for accounts with an OpenXBL key, Twitch (`id.twitch.tv`, `api.twitch.tv`, and profile pictures and live snapshots from `static-cdn.jtvnw.net`) only when you set up Twitch, `api.github.com` and `github.com` (update check, and the download when you click Update now) and opens `sotrep.com` links in your browser. If a shared list is set up, it also downloads that list and sends your links only when you press **Send my links**. No telemetry. With a Discord webhook set up, the list is sent to that Discord channel (`discord.com`) when you post it or after a refresh if you switched that on. Never post `ms_accounts.json`, `openxbl_keys.json`, `discord.json`, `players.db` or export files publicly; the repo's `.gitignore` excludes them.
 
 ## Development
 ```
 python -m pytest -q        # tests
 python run.py              # run from source
-./build.ps1                # build dist\BetterRecentlyPlayedWith.exe
+python run_cli.py          # the terminal version from source
+./build.ps1                # build dist\BetterRecentlyPlayedWith.exe and dist\brpw-cli.exe
 ```
-CI (`.github/workflows/build.yml`) tests and builds on Windows; pushing a tag `vX.Y.Z` attaches the exe and a SHA-256 file to a release. The hash comes from the same place as the exe, so it detects corruption, not tampering; code signing is not set up yet.
+CI (`.github/workflows/build.yml`) tests and builds on Windows and Linux (Ubuntu 22.04, tests on a virtual screen); pushing a tag `vX.Y.Z` attaches the four programs (app and terminal version for Windows and Linux), one SHA-256 file and the notes in `docs/RELEASE_NOTES.md` to a release. The hash comes from the same place as the exe, so it detects corruption, not tampering; code signing is not set up yet.
 
 License: MIT (simple, permissive). Not affiliated with Microsoft, Xbox, Rare or SOTREP.

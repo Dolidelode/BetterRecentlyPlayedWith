@@ -1,19 +1,23 @@
 """Is Sea of Thieves running on this PC? Used to pause the automatic refresh while the game is closed.
 
 Steam and the Microsoft Store / Xbox app both run the game as SoTGame.exe. Only process names are read, through the
-Windows ToolHelp snapshot (no extra console window, no admin rights needed).
+Windows ToolHelp snapshot (no extra console window, no admin rights needed). On Linux the game runs through Proton
+(Steam) or Wine under the same name, which shows in /proc.
 """
-import ctypes
+import os
 import sys
-from ctypes import wintypes
 
 GAME_EXES = ("sotgame.exe",)
 
 
 def running_processes() -> set:
-    """Lower-case executable names of all running processes; empty when this is not Windows or the call fails."""
+    """Lower-case executable names of all running processes; empty when the call fails."""
+    if sys.platform.startswith("linux"):
+        return linux_processes()
     if sys.platform != "win32":
         return set()
+    import ctypes
+    from ctypes import wintypes
 
     class PROCESSENTRY32W(ctypes.Structure):
         _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
@@ -40,6 +44,26 @@ def running_processes() -> set:
             ok = k32.Process32NextW(snap, ctypes.byref(e))
     finally:
         k32.CloseHandle(snap)
+    return names
+
+
+def linux_processes(proc="/proc") -> set:
+    """Program names on Linux: each process's own name and the file name of its command (a Proton game's
+    command line names the .exe)."""
+    names = set()
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return names
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, "comm"), encoding="utf-8", errors="replace") as f:
+                names.add(f.read().strip().lower())
+            with open(os.path.join(proc, pid, "cmdline"), "rb") as f:
+                first = f.read(4096).split(b"\0")[0].decode("utf-8", "replace")
+            names.add(first.replace("\\", "/").rsplit("/", 1)[-1].lower())
+        except OSError:                                    # the process ended meanwhile, or isn't ours to read
+            continue
     return names
 
 

@@ -215,7 +215,13 @@ def open_profile(gamertag: str, xuid, start=None, web=None, installed=xbox_app_i
 
 def _start(link):
     import os
-    os.startfile(link)
+    import sys
+    if sys.platform == "win32":
+        os.startfile(link)
+    else:                                                # Linux/macOS: the desktop's own handler (xdg-open, open)
+        import webbrowser
+        if not webbrowser.open(link):
+            raise OSError("No program to open " + link)
 
 
 def _web(url):

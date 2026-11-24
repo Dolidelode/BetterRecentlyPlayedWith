@@ -2,6 +2,7 @@
 import json
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -9,7 +10,7 @@ import webbrowser
 from tkinter import filedialog, scrolledtext, ttk
 from tkinter import font as tkfont
 
-from . import __version__, chat_ui, direct, social, sotrep, updater, xboxui
+from . import __version__, chat_ui, direct, discord, report, social, sotrep, updater, xboxui
 from .db import Database
 from .paths import data_dir
 from .providers import (ManualImportProvider, OpenXblKey, OpenXblProvider, ProviderError, account_picture,
@@ -181,6 +182,7 @@ class App(SharedListMixin):
         self.chat_cache = {}                     # (key, xuid) -> last history
         self.pictures = chat_ui.Pictures(data_dir() / "pictures", lambda fn: self.q.put(("call", fn)))
         self.previews = chat_ui.Previews(lambda fn: self.q.put(("call", fn)))     # Twitch's live snapshots
+        self.discord_cfg = discord.DiscordConfig(data_dir() / "discord.json")
         self.root.after(20_000, self._prune_round)      # after the first sync, never in its way
         self._badged, self._pic_job = {}, None         # pictures with a Twitch badge; pending redraw
         self.profiles_busy, self.profiles_at = False, 0.0
@@ -507,7 +509,11 @@ class App(SharedListMixin):
         # per-player actions live in the right-click menu; whole-list actions are in the top bar
         self.tree.bind("<Button-3>", self._row_menu)
         self.tree.bind("<Shift-F10>", self._row_menu)
-        self.tree.bind("<App>", self._row_menu)
+        for key in ("<App>", "<Menu>"):                    # the menu key: "App" on Windows, "Menu" on Linux
+            try:
+                self.tree.bind(key, self._row_menu)
+            except tk.TclError:                            # not a key name on this system
+                pass
 
         # ---- status bar: what's happening on the left, legend and count on the right
         self.status = tk.StringVar()
@@ -915,6 +921,101 @@ class App(SharedListMixin):
                                 + (", hidden from the list" if self.hide_crew else "") + "; untag to show again).")
         threading.Thread(target=work, daemon=True).start()
 
+    # ---- Discord: the list in a channel through a webhook
+    fetch_discord = staticmethod(lambda cfg, account, players, force: discord.post_list(cfg, account, players, force))
+
+    def _discord_round(self, force=False, said=None):
+        """Post (or update) the list in Discord: after a refresh when that's switched on, or on Post now."""
+        cfg = self.discord_cfg
+        if not cfg["url"] or (not force and not cfg["auto"]) or getattr(self, "_discord_busy", False):
+            return
+        account = self.xkey.active() or ""
+        players = report.recent(self.db, account, limit=int(cfg["limit"]))
+        self._discord_busy = True
+
+        def work():
+            try:
+                res, err = self.fetch_discord(cfg, account, players, force), None
+            except ProviderError as e:
+                res, err = None, str(e)
+            except Exception as e:                       # never let a worker thread die silently
+                res, err = None, f"Unexpected error: {e}"
+            self.q.put(("call", lambda: done(res, err)))
+
+        def done(res, err):
+            self._discord_busy = False
+            text = (f"Discord: {err}" if err else {"sent": "Posted the list to Discord.",
+                                                    "edited": "Updated the list in Discord.",
+                                                    "unchanged": "Discord: the list hasn't changed."}[res])
+            if err or force:
+                self.set_status(text, error=bool(err))
+            if said is not None:
+                try:
+                    said.set(text)
+                except tk.TclError:                      # the Discord tab was closed meanwhile
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def discord_dialog(self):
+        """The Discord tab: the webhook address, when to post, and Post now."""
+        P, cfg = self.pal, self.discord_cfg
+        win = self._page("discord", "Discord", fresh=True)
+        box = tk.Frame(win, bg=P["bg"])
+        box.pack(fill="x", padx=24, pady=20)
+        tk.Label(box, text="Your list in Discord", bg=P["bg"], fg=P["fg"], font=("Segoe UI", 15, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(box, text="Shows your recently-played list in a Discord channel: each player with a SOTREP link, "
+                 "hours, and their Twitch channel (live or not). In Discord: Server settings → Integrations → "
+                 "Webhooks → New webhook → Copy webhook URL, then paste it here. The address is saved only on this "
+                 "PC; anyone who has it can post in that channel.", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9),
+                 wraplength=640, justify="left", anchor="w").pack(fill="x", pady=(4, 14))
+        url = tk.StringVar(value=cfg["url"])
+
+        def make(p, bg):
+            return tk.Entry(p, textvariable=url, bg=bg, fg=P["fg"], insertbackground=P["fg"], relief="flat", bd=0,
+                            font=("Segoe UI", 10), highlightthickness=0, show="•" if cfg["url"] else "")
+        field = chat_ui.RoundBox(box, P, P["bg"], make, height=38, radius=18)
+        field.pack(fill="x")
+        said = tk.StringVar(value="Webhook saved." if cfg["url"] else "No webhook yet.")
+        row = chat_ui.Flow(box, P["bg"])
+        row.pack(fill="x", pady=(12, 0))
+
+        def save():
+            try:
+                cfg.update(url=discord.check_url(url.get()))
+            except ProviderError as e:
+                return said.set(str(e))
+            field.inner.configure(show="•")
+            said.set("Webhook saved. Post now to see it in your channel.")
+
+        def remove():
+            cfg.update(url="", auto=False)
+            url.set("")
+            field.inner.configure(show="")
+            auto.set(False)
+            said.set("Webhook removed: nothing is posted any more.")
+        row.add(chat_ui.RoundButton(row, "Save", save, P, P["bg"], kind="accent", padx=18, pady=7))
+        row.add(chat_ui.RoundButton(row, "Post now", lambda: self._discord_round(force=True, said=said), P, P["bg"],
+                                    padx=16, pady=7))
+        row.add(chat_ui.RoundButton(row, "Remove webhook", remove, P, P["bg"], padx=16, pady=7), right=True)
+        opts = tk.Frame(box, bg=P["bg"])
+        opts.pack(fill="x", pady=(16, 0))
+        auto, keep = tk.BooleanVar(value=cfg["auto"]), tk.BooleanVar(value=cfg["keep_one"])
+        ttk.Checkbutton(opts, text="Update Discord after every refresh (only when the list changed)", variable=auto,
+                        command=lambda: cfg.update(auto=auto.get())).pack(anchor="w")
+        ttk.Checkbutton(opts, text="Keep one message up to date (off: a new message each time)", variable=keep,
+                        command=lambda: cfg.update(keep_one=keep.get(), message_id="")).pack(anchor="w", pady=(4, 0))
+        lim = tk.StringVar(value=f"{cfg['limit']} players")
+        lrow = tk.Frame(opts, bg=P["bg"])
+        lrow.pack(anchor="w", pady=(8, 0))
+        tk.Label(lrow, text="Show", bg=P["bg"], fg=P["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
+        chat_ui.PillSelect(lrow, P, P["bg"], lim, values=[f"{n} players" for n in (5, 10, 15, 20, 30)],
+                           on_change=lambda: cfg.update(limit=int(lim.get().split()[0])), pady=5).pack(side="left")
+        tk.Label(box, textvariable=said, bg=P["bg"], fg=P["fg"], font=("Segoe UI", 9), anchor="w", wraplength=640,
+                 justify="left").pack(fill="x", pady=(14, 0))
+        win.url, win.save, win.remove, win.said, win.auto = url, save, remove, said, auto        # for tests
+        return win
+
     def _prune_round(self):
         """Once a day (and at start): forget old players and unused pictures, so the data stays small."""
         if self.closing:
@@ -942,7 +1043,8 @@ class App(SharedListMixin):
         has = "normal" if self.xkey.active() else "disabled"
         m.add_command(label="Add Xbox account...", command=self.set_key)
         m.add_command(label="Remove this account", command=self.remove_account, state=has)
-        m.add_command(label="Switch Game Bar to this account", command=self.switch_game_bar, state=has)
+        if sys.platform == "win32":                       # Game Bar and the Xbox app exist only on Windows
+            m.add_command(label="Switch Game Bar to this account", command=self.switch_game_bar, state=has)
         m.add_checkbutton(label="Pop-up for new Xbox messages", variable=self.msg_popups,
                           command=self.set_message_popups)
         m.add_separator()
@@ -951,6 +1053,7 @@ class App(SharedListMixin):
         m.add_separator()
         m.add_command(label="Shared Twitch list...", command=self.shared_dialog)
         m.add_command(label="Twitch setup...", command=self.twitch_setup_dialog)
+        m.add_command(label="Discord...", command=self.discord_dialog)
         m.add_separator()
         themes = self._menu(m)
         self.theme_choice = tk.IntVar(value=self.theme)
@@ -2012,6 +2115,8 @@ class App(SharedListMixin):
     def _page_gone(self, key, page):
         if self.pages.get(key) is page:
             del self.pages[key]
+        if self.closing or not self.tabstrip.winfo_exists():   # the window is closing: nothing to update
+            return
         if key not in dict(self.MAIN_TABS):
             self.tabstrip.remove(key)
         self.page_trail = [k for k in getattr(self, "page_trail", []) if k != key]
@@ -3144,7 +3249,9 @@ class App(SharedListMixin):
         ttk.Label(win, style="Hint.TLabel", wraplength=420, justify="left", text=(
             "Opens Microsoft's own sign-in page in your browser; you type your password there, never in this app. "
             "The app talks to Xbox directly: no xbl.io account or key, the game and time for each recent player, "
-            "and your full message inbox. The sign-in is saved encrypted for this Windows user only.")
+            "and your full message inbox. " + ("The sign-in is saved encrypted for this Windows user only."
+                                               if sys.platform == "win32" else
+                                               "The sign-in is saved in a file only your user can read."))
         ).pack(fill="x", padx=16)
         ttk.Button(win, text="Use an OpenXBL key instead...",
                    command=lambda: (win.destroy(), self.add_openxbl_key())).pack(fill="x", padx=16, pady=(14, 4))
@@ -3535,6 +3642,7 @@ class App(SharedListMixin):
             self.db.apply_shared()                   # newly met players may be in the master list
             if not imported:
                 self._crew_round()
+                self.root.after(4000, self._discord_round)       # after the crew check, so crewmates stay out
             who = "" if imported or not self.xkey.active() else f" as {self.xkey.active()}"
             self.set_status(("Imported: " if imported else f"Synced{who}: ") + out.message)
         else:

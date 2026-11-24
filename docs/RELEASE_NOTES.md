@@ -1,19 +1,15 @@
-## What's new in 0.3.0
+## What's new in 0.4.0
 
-**One window with tabs.** Players, Friends & messages, Live streams and Live now are tabs; chats, Encounters, Import, Add account, Twitch setup and the shared list open as tabs with ×. Switching tabs never reloads anything. Questions appear inside the window instead of message boxes.
+**Linux.** `BetterRecentlyPlayedWith-linux` is the same app for Linux (`chmod +x`, then run it). It finds Sea of Thieves running through Steam's Proton, scrolls with the mouse wheel and keeps its data in `~/.local/share/BetterRecentlyPlayedWith`. On Linux the Microsoft sign-in is kept in a file only your user can read, updates are offered as a link to this page, and the Xbox app / Game Bar account switch isn't there.
 
-**Slim or wide.** The window can be as narrow as about 480 pixels: buttons wrap, tab names shorten and Friends & messages shows the list or the chat.
+**Terminal version.** `brpw-cli.exe` (Windows) and `brpw-cli-linux`: your recently-played list with Twitch channels (yours and the shared master list) and SOTREP links, your accounts, and Discord, in cmd, PowerShell, Windows Terminal or a Linux terminal.
+- Double-click `brpw-cli.exe` for a menu that stays open; the first time, a short setup adds your account.
+- `brpw-cli help` lists every command; `brpw-cli watch` keeps refreshing; `--json` for scripts.
+- The window opens big enough for the list, and the list fits any width (links never get cut off).
+- It shares accounts and history with the app.
 
-**List views.** Cards, Compact or Rows on the Players, Live streams and Live now tabs. Search, sort and filters can be hidden. Views, sorting and filters are remembered.
+**Discord.** ☰ → Discord... (or `brpw-cli discord set URL`): paste a webhook address and your list is posted to that channel, each player linked to SOTREP with hours and Twitch (🔴 LIVE). One message is kept up to date instead of a new one each time, nothing is sent when the list hasn't changed, and a gamertag can never ping anyone. Post by hand or after every refresh.
 
-**Friends & messages.** Chats, friends and friend requests in one tab (opens on Friends). Accept, ignore or cancel friend requests, with a pop-up for new ones. The friend list now shows your real Xbox friends, and Add friend sends a real friend request.
+**Fixes.** Closing the app while an extra tab (like Discord) was open could show an error.
 
-**Your crew.** See who is on your ship, and who is aboard your friends' ships. People you sail with in two or more sessions are tagged crew and hidden from the recently-played list (Crew hidden / Crew shown).
-
-**Live streams.** Twitch profile pictures; click a stream to unfold it with Twitch's live snapshot, the full title and Watch on Twitch.
-
-**Stays small.** Players not seen for 2 weeks are forgotten (tagged players, your unshared Twitch links and the shared list are kept); change it under ☰ → Forget players not seen for.
-
-**Smaller things.** Friends are a slightly darker card instead of a colour. Sent friend requests no longer show as received.
-
-The first start upgrades your data (a backup is made first). Inviting to or joining a game isn't in the app: Sea of Thieves only allows that in the game or Game Bar.
+Your data and settings carry over; nothing needs to be set up again. The full history of changes is in CHANGELOG.md.

@@ -11,6 +11,8 @@ def data_dir() -> Path:
         base = Path(override)
     elif os.environ.get("APPDATA"):
         base = Path(os.environ["APPDATA"]) / APP_NAME
+    elif os.environ.get("XDG_DATA_HOME"):
+        base = Path(os.environ["XDG_DATA_HOME"]) / APP_NAME
     else:
         base = Path.home() / ".local" / "share" / APP_NAME
     base.mkdir(parents=True, exist_ok=True)

@@ -9,8 +9,6 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,26 +21,78 @@ jobs:
         env:
           SHARED: ${{ secrets.SHARED_SERVICE_JSON }}
         run: if ($env:SHARED) { $env:SHARED | Out-File assets/shared_service.json -Encoding utf8NoBOM }
-      - name: Build
+      - name: Build the app and the terminal version
         shell: pwsh
         run: |
           $extra = @()
           if (Test-Path assets/shared_service.json) { $extra = @("--add-data", "assets/shared_service.json;assets") }
-          python -m PyInstaller --noconfirm --onefile --windowed --icon assets/app.ico --add-data "assets/icons;assets/icons" --add-data "assets/twitch_live.png;assets" @extra --name BetterRecentlyPlayedWith run.py
-      - name: Checksum
-        shell: pwsh
-        run: |
-          $h = (Get-FileHash dist\BetterRecentlyPlayedWith.exe -Algorithm SHA256).Hash
-          "$h  BetterRecentlyPlayedWith.exe" | Out-File dist\SHA256SUMS.txt -Encoding ascii
+          python -m PyInstaller --noconfirm --onefile --windowed --icon assets/app.ico --add-data "assets/icons;assets/icons" --add-data "assets/twitch_live.png;assets" --exclude-module numpy @extra --name BetterRecentlyPlayedWith run.py
+          python -m PyInstaller --noconfirm --onefile --console --icon assets/app.ico --exclude-module numpy @extra --name brpw-cli run_cli.py
+          dist\brpw-cli.exe --version
       - uses: actions/upload-artifact@v4
         with:
-          name: BetterRecentlyPlayedWith-windows
-          path: dist/*
+          name: windows
+          path: |
+            dist/BetterRecentlyPlayedWith.exe
+            dist/brpw-cli.exe
+
+  linux:
+    runs-on: ubuntu-22.04          # an older glibc, so the programs also run on older distributions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: python -m pip install -r requirements-dev.txt
+      - run: xvfb-run -a -s "-screen 0 1280x800x24" python -m pytest -q
+      - name: Shared list address (optional repository secret SHARED_SERVICE_JSON)
+        env:
+          SHARED: ${{ secrets.SHARED_SERVICE_JSON }}
+        run: if [ -n "$SHARED" ]; then printf '%s' "$SHARED" > assets/shared_service.json; fi
+      - name: Build the app and the terminal version
+        run: |
+          extra=""
+          if [ -f assets/shared_service.json ]; then extra="--add-data assets/shared_service.json:assets"; fi
+          python -m PyInstaller --noconfirm --onefile --add-data "assets/icons:assets/icons" --add-data "assets/twitch_live.png:assets" --exclude-module numpy $extra --name BetterRecentlyPlayedWith-linux run.py
+          python -m PyInstaller --noconfirm --onefile --console --exclude-module numpy $extra --name brpw-cli-linux run_cli.py
+          ./dist/brpw-cli-linux --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/BetterRecentlyPlayedWith-linux
+            dist/brpw-cli-linux
+
+  release:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd out
+          chmod +x BetterRecentlyPlayedWith-linux brpw-cli-linux
+          sha256sum BetterRecentlyPlayedWith.exe brpw-cli.exe BetterRecentlyPlayedWith-linux brpw-cli-linux > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BetterRecentlyPlayedWith-all
+          path: out/*
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           body_path: docs/RELEASE_NOTES.md
           files: |
-            dist/BetterRecentlyPlayedWith.exe
-            dist/SHA256SUMS.txt
+            out/BetterRecentlyPlayedWith.exe
+            out/brpw-cli.exe
+            out/BetterRecentlyPlayedWith-linux
+            out/brpw-cli-linux
+            out/SHA256SUMS.txt

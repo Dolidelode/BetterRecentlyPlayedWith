@@ -84,8 +84,9 @@ def check(timeout: int = 10) -> Optional[UpdateInfo]:
 
 # ---- in-app update (only when the user clicks "Update now")
 def running_exe() -> Optional[Path]:
-    """The program file when running as the built .exe; None when running from source."""
-    return Path(sys.executable) if getattr(sys, "frozen", False) else None
+    """The program file when running as the built Windows .exe; None from source or on Linux/macOS (there the
+    release page is offered instead of replacing the program)."""
+    return Path(sys.executable) if getattr(sys, "frozen", False) and sys.platform == "win32" else None
 
 
 def _fetch(url: str, limit: int, timeout: int = 60) -> bytes:
