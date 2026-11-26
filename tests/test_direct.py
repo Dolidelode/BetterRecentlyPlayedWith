@@ -348,3 +348,131 @@ def test_your_crew_comes_from_your_ship_session(monkeypatch):
         assert social.my_crew(msauth.MARK + XUID) is None                       # not on a ship
     finally:
         direct.configure(None)
+
+
+def test_crew_is_read_from_the_ship_session_the_lobby_points_to(monkeypatch):
+    # seen for real 2026-11-25: your handle leads to a lobby with only you; its TargetSessionHandle names the ship
+    import base64
+    # the handle's template must match the target's (our _handle helper uses MediumShipSessionTemplate)
+    target = base64.b64encode(b"MediumShipSessionTemplate;ship-1;opaque==").decode()
+    lobby = {"properties": {"custom": {"SessionTarget": "CrewSession", "TargetSessionHandle": target}},
+             "constants": {"system": {"maxMembersCount": 2}},
+             "members": {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}}}}
+    ship = {"membersInfo": {"count": 2}, "constants": {"system": {"maxMembersCount": 2}},
+            "members": {"0": {"gamertag": "Salty", "constants": {"system": {"xuid": "77"}}},
+                        "1": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}}}}
+
+    def fake_request(method, url, auth, version, data=None, timeout=20):
+        if url.endswith("/sessions/ship-1"):
+            return ship
+        if "/sessions/" in url:
+            return lobby
+        return {"results": [_handle(XUID, "mine", members=1, most=2)]}
+    monkeypatch.setattr(direct, "_request", fake_request)
+    direct.configure(FakeAccounts())
+    try:
+        crew = social.my_crew(msauth.MARK + XUID)
+        assert crew["ship"] == "sloop" and crew["members"] == [{"xuid": "77", "gamertag": "Salty"}]
+        s = social.ships(msauth.MARK + XUID)[XUID]                             # a friend's view: 2/2, both aboard
+        assert social.ship_label(s) == "on a sloop · 2/2 · full" and len(s["crew"]) == 2
+    finally:
+        direct.configure(None)
+    assert direct.crew_target({"properties": {"custom": {"TargetSessionHandle": "not base64!"}}}) is None
+    bad = base64.b64encode(b"Template;../../x;y").decode()
+    assert direct.crew_target({"properties": {"custom": {"TargetSessionHandle": bad}}}) is None   # never a path
+
+
+def test_a_session_that_could_hold_another_crew_is_never_your_crew(monkeypatch):
+    import base64
+    lobby_of = lambda tmpl: {"constants": {"system": {"maxMembersCount": 2}}, "properties": {"custom": {
+        "TargetSessionHandle": base64.b64encode(f"{tmpl};battle-1;x".encode()).decode()}},
+        "members": {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}}}}
+    battle = {"membersInfo": {"count": 4}, "constants": {"system": {"maxMembersCount": 4}},
+              "members": {str(i): {"gamertag": f"P{i}", "constants": {"system": {"xuid": str(70 + i)}}}
+                          for i in range(4)}}
+    for lobby in (lobby_of("HourglassBattleTemplate"),            # another kind of session
+                  lobby_of("MediumShipSessionTemplate")):         # same kind, but bigger than your ship
+        monkeypatch.setattr(direct, "_request", lambda m, url, *a, lobby=lobby, **k: (
+            battle if url.endswith("/battle-1") else lobby if "/sessions/" in url
+            else {"results": [_handle(XUID, "mine", members=1, most=2)]}))
+        direct.configure(FakeAccounts())
+        try:
+            assert social.my_crew(msauth.MARK + XUID)["members"] == []        # nobody tagged as crew
+        finally:
+            direct.configure(None)
+
+
+def test_crew_is_still_read_when_the_game_stops_publishing_your_ship(monkeypatch):
+    # seen for real 2026-11-25: the handle disappeared mid-voyage while the same crew sailed on
+    import base64
+    direct._last_crew.clear()
+    target = base64.b64encode(b"MediumShipSessionTemplate;ship-1;x").decode()
+    lobby = {"constants": {"system": {"maxMembersCount": 4}},
+             "properties": {"custom": {"TargetSessionHandle": target}}, "members": {}}
+    aboard = {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}},
+              "1": {"gamertag": "Salty", "constants": {"system": {"xuid": "77"}}}}
+    ship = {"membersInfo": {"count": 2}, "constants": {"system": {"maxMembersCount": 4}}, "members": aboard}
+    state = {"handle": True, "playing": True}
+
+    def fake_request(method, url, auth, version, data=None, timeout=20):
+        if "userpresence" in url:
+            return {"devices": [{"titles": [{"id": social.SOT_TITLE_ID if state["playing"] else "1"}]}]}
+        if url.endswith("/sessions/ship-1"):
+            return ship
+        if "/sessions/" in url:
+            return lobby
+        return {"results": [_handle(XUID, "mine", members=1, most=4)] if state["handle"] else []}
+    monkeypatch.setattr(direct, "_request", fake_request)
+    direct.configure(FakeAccounts())
+    try:
+        first = social.my_crew(msauth.MARK + XUID)
+        state["handle"] = False                                           # the game stopped publishing it
+        later = social.my_crew(msauth.MARK + XUID)
+        assert later["members"] == first["members"] == [{"xuid": "77", "gamertag": "Salty"}]
+        assert later["session"] == first["session"] and later["ship"] == "galleon"   # counted as the same session
+        ship["members"] = {"1": aboard["1"]}                              # you left the ship: forgotten
+        assert social.my_crew(msauth.MARK + XUID) is None and not direct._last_crew
+        ship["members"] = aboard
+        state["handle"] = True
+        social.my_crew(msauth.MARK + XUID)
+        state["handle"], state["playing"] = False, False                  # closed the game: forgotten
+        assert social.my_crew(msauth.MARK + XUID) is None and not direct._last_crew
+    finally:
+        direct.configure(None)
+        direct._last_crew.clear()
+
+
+def test_crew_is_found_in_your_session_list_when_there_is_no_ship_handle(monkeypatch):
+    # seen for real 2026-11-26 in Hourglass: no activity handle at all, but sessions?xuid=me&private=true lists your
+    # lobby (template name in lower case) and the crew session it points to
+    import base64
+    direct._last_crew.clear()
+    base = "https://sessiondirectory.xboxlive.com/serviceconfigs/" + social.SOT_SCID
+    target = base64.b64encode(b"SmallShipSessionTemplate;crew-1;x").decode()
+    lobby = {"constants": {"system": {"maxMembersCount": 2}}, "properties": {"custom": {"TargetSessionHandle": target}},
+             "members": {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}}}}
+    crew = {"membersInfo": {"count": 2}, "constants": {"system": {"maxMembersCount": 2}},
+            "members": {"0": {"gamertag": "Me", "constants": {"system": {"xuid": XUID}}},
+                        "1": {"gamertag": "HcMate", "constants": {"system": {"xuid": "77"}}}}}
+    ref = lambda name: {"sessionRef": {"scid": social.SOT_SCID, "templateName": "smallshipsessiontemplate",
+                                       "name": name}}
+
+    def fake_request(method, url, auth, version, data=None, timeout=20):
+        if url == f"{base}/sessions?xuid={XUID}&private=true":
+            return {"results": [ref("crew-1"), ref("lobby-1")]}
+        if url.endswith("/sessions/crew-1"):
+            return crew
+        if url.endswith("/sessions/lobby-1"):
+            return lobby
+        return {"results": []}                                             # no activity handle
+    monkeypatch.setattr(direct, "_request", fake_request)
+    direct.configure(FakeAccounts())
+    try:
+        got = social.my_crew(msauth.MARK + XUID)
+        assert got["ship"] == "sloop" and got["members"] == [{"xuid": "77", "gamertag": "HcMate"}]
+        crew["constants"]["system"]["maxMembersCount"] = 4                 # bigger than your sloop: not your crew
+        direct._last_crew.clear()
+        assert social.my_crew(msauth.MARK + XUID)["members"] == []
+    finally:
+        direct.configure(None)
+        direct._last_crew.clear()

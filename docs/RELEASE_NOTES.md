@@ -1,8 +1,12 @@
-## What's new in 0.4.1
+## What's new in 0.4.2
 
-A fix for the Linux programs (`BetterRecentlyPlayedWith-linux` and `brpw-cli-linux`); Windows is unchanged.
+Mostly about your crew, for Windows and Linux.
 
-- **Signing in works on Linux.** It failed with `CERTIFICATE_VERIFY_FAILED` (and so did every other connection): the programs looked for trusted certificates where the build machine keeps them. They now use your system's own list, or `SSL_CERT_FILE` if you set it.
-- **The browser opens again.** On newer distributions such as Arch, opening the sign-in page or a link crashed `/bin/sh` with `symbol lookup error`, because it picked up libraries bundled inside the program. Programs the app starts now use your system's own libraries.
+- **Your crew is found.** Before, it often wasn't. The app now follows Xbox's lobby to the session with your whole crew, including crewmates who aren't Xbox friends. It keeps them for the whole voyage, even after Sea of Thieves stops publishing your ship, and it works in Hourglass, where the game publishes no ship at all. Hourglass opponents are never taken for crew.
+- **Crew box.** Your crew has its own box above "Recently played with" (⚓ Your galleon · 3 aboard), with the same cards. Click the title to fold it.
+- **Mark as crew / Not crew** in a player's right-click menu, for when you want to decide yourself.
+- **Friend labels stay.** Xbox friends lost their Friend label after a refresh when they didn't follow you (or you them).
+- **Smooth scrolling** in the lists and chats.
+- **Linux:** right-click menus stay open after a normal click (they needed the button held down).
 
-Download the new Linux file(s) and replace the old ones; your data and settings carry over. The full history of changes is in CHANGELOG.md.
+Download the new file(s) and replace the old ones; your data and settings carry over. The full history of changes is in CHANGELOG.md.

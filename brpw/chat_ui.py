@@ -2,6 +2,7 @@
 conversation list with avatars. Tk has no rounded widgets, so these are drawn on canvases."""
 import os
 import re
+import sys
 import time
 import tkinter as tk
 import zlib
@@ -46,6 +47,74 @@ def wheel(widget, handler):
             widget.unbind_all(seq)
     widget.bind("<Enter>", on, add="+")
     widget.bind("<Leave>", off, add="+")
+
+
+# Right-click menus open when the button is pressed on Windows (its convention). On Linux they open when it is
+# released: opened on the press, the release that follows reaches the new menu (Wayland/XWayland and some window
+# managers), so the menu only stayed while the button was held.
+RIGHT_CLICK = "<Button-3>" if sys.platform == "win32" else "<ButtonRelease-3>"
+
+
+def popup(menu, x, y):
+    """Show a menu at (x, y). On Windows tk_popup waits until the menu closes, then its grab is let go; elsewhere it
+    returns at once and Tk lets the grab go itself when the menu closes (letting go here made the menu need a held
+    button on Linux)."""
+    try:
+        menu.tk_popup(x, y)
+    finally:
+        if sys.platform == "win32":
+            menu.grab_release()
+
+
+class SmoothScroll:
+    """Mouse-wheel scrolling that glides: each wheel step sets a target and the view moves towards it in small steps
+    (about 60 per second), so the list doesn't jump. moved() runs after every step (a list that draws only the cards
+    in view draws the newly visible ones there). Touchpads that send small steps scroll a little at a time."""
+
+    STEP = 110                                            # pixels per wheel notch
+
+    def __init__(self, canvas, moved=None):
+        self.c, self.moved = canvas, moved
+        self.target, self.job = None, None
+
+    def wheel(self, e):
+        c = self.c
+        try:
+            region = [float(v) for v in str(c.cget("scrollregion")).split()]
+            total, h = (region[3] if len(region) == 4 else c.winfo_height()), c.winfo_height()
+        except (tk.TclError, ValueError):
+            return
+        if total <= h:
+            return
+        start = self.target if self.target is not None else c.canvasy(0)
+        self.target = max(0.0, min(total - h, start - e.delta / 120 * self.STEP))
+        self._total = total
+        if self.job is None:
+            self._tick()
+
+    def _tick(self):
+        self.job = None
+        c = self.c
+        try:
+            now = c.canvasy(0)
+        except tk.TclError:
+            return
+        if self.target is None:
+            return
+        d = self.target - now
+        if abs(d) < 1:
+            self.target = None
+            return
+        move = d * 0.35
+        if abs(move) < 1:
+            move = 1 if d > 0 else -1
+        c.yview_moveto((now + move) / self._total)
+        if self.moved:
+            self.moved()
+        if abs(c.canvasy(0) - now) < 0.5:                    # couldn't move (at an end): stop
+            self.target = None
+            return
+        self.job = c.after(16, self._tick)
 
 
 def friend_shade(colour: str) -> str:
@@ -548,10 +617,8 @@ class ChatView(tk.Frame):
         self.day_font = tkfont.Font(family="Segoe UI", size=8, weight="bold")
         self.messages, self.other, self.note, self._width, self._job = [], "", "", 0, None
         self.canvas.bind("<Configure>", self._resized)
-        wheel(self.canvas, self._wheel)
-
-    def _wheel(self, e):
-        self.canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
+        self._glide = SmoothScroll(self.canvas)
+        wheel(self.canvas, self._glide.wheel)
 
     def _resized(self, e):
         if abs(e.width - self._width) > 2:
@@ -622,7 +689,7 @@ class ChatView(tk.Frame):
                 y += 16
             y += 6
             if self.on_menu:
-                c.tag_bind(tag, "<Button-3>", lambda e, m=m: self.on_menu(m, e))
+                c.tag_bind(tag, RIGHT_CLICK, lambda e, m=m: self.on_menu(m, e))
         c.configure(scrollregion=(0, 0, width, y + 12))
         if at_end:
             c.yview_moveto(1.0)
@@ -654,11 +721,9 @@ class ConversationList(tk.Frame):
         self.canvas.bind("<Motion>", self._motion)
         self.canvas.bind("<Leave>", lambda e: self._set_hover(None))
         self.canvas.bind("<Button-1>", self._click)
-        self.canvas.bind("<Button-3>", self._right)
-        wheel(self.canvas, self._wheel)
-
-    def _wheel(self, e):
-        self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
+        self.canvas.bind(RIGHT_CLICK, self._right)
+        self._glide = SmoothScroll(self.canvas)
+        wheel(self.canvas, self._glide.wheel)
 
     def set(self, rows):
         """rows: dicts with kind "chat" (xuid, gamertag, preview, at, unread, muted, state, mine) or
@@ -821,7 +886,9 @@ class PlayerCards(tk.Frame):
         c.bind("<Button-1>", self._press)
         c.bind("<Motion>", self._motion)
         c.bind("<Leave>", lambda e: self._set_hover(None))
-        wheel(c, self._wheel)
+        self._glide = SmoothScroll(c, self._maybe_draw)
+        self._drawn = (0, -1)                              # canvas y range that has cards drawn
+        wheel(c, self._glide.wheel)
         c.bind("<Up>", lambda e: self._step(-1, e))
         c.bind("<Down>", lambda e: self._step(1, e))
 
@@ -1015,12 +1082,17 @@ class PlayerCards(tk.Frame):
 
     def _scrolled(self, first, last):
         self.sb.set(first, last)
-        if getattr(self, "_drawn_top", None) != round(float(first), 4):
-            self._schedule()
+        self._maybe_draw()
 
-    def _wheel(self, e):
-        self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
-        self._draw()
+    def _maybe_draw(self):
+        """Draw now when the view reaches past the cards drawn so far (else nothing: they're already there)."""
+        try:
+            top = self.canvas.canvasy(0)
+            bottom = top + self.canvas.winfo_height()
+        except tk.TclError:
+            return
+        if top < self._drawn[0] or bottom > self._drawn[1]:
+            self._draw()
 
     def _set_hover(self, iid):
         if iid != self._hover:
@@ -1072,9 +1144,12 @@ class PlayerCards(tk.Frame):
         c.delete("all")
         self._zones = {}
         top = c.canvasy(0)
-        self._drawn_top = round(c.yview()[0], 4)
-        first = max(0, int((top - self.TOP) // self.ROW))
-        last = min(len(self._order), first + int(c.winfo_height() // self.ROW) + 3)
+        screen = int(c.winfo_height() // self.ROW) + 2
+        at = max(0, int((top - self.TOP) // self.ROW))
+        first = max(0, at - screen)                        # a screen above and below: scrolling rarely redraws
+        last = min(len(self._order), at + 2 * screen + 1)
+        self._drawn = (float("-inf") if first == 0 else self.TOP + first * self.ROW,
+                       float("inf") if last == len(self._order) else self.TOP + last * self.ROW)
         show = set(self._display)
         friend_bg = self._tags.get("friend", {}).get("background") or P["friend"]
         for i in range(first, last):
@@ -1275,7 +1350,9 @@ class CardList(tk.Frame):
         c.bind("<Motion>", lambda e: self._set_hover(self._at(e.y)))
         c.bind("<Leave>", lambda e: self._set_hover(None))
         c.bind("<Button-1>", self._click)
-        wheel(c, self._wheel)
+        self._glide = SmoothScroll(c, self._maybe_redraw)
+        self._drawn = (0, -1)
+        wheel(c, self._glide.wheel)
 
     # ---- the Treeview-like part
     def insert(self, parent, index, iid=None, values=(), tags=(), **kw):
@@ -1315,7 +1392,7 @@ class CardList(tk.Frame):
         self.event_generate("<<TreeviewSelect>>")
 
     def bind(self, sequence=None, func=None, add=None):
-        if sequence in ("<Double-1>", "<Button-3>", "<Return>"):
+        if sequence in ("<Double-1>", "<Button-3>", "<ButtonRelease-3>", "<Return>"):
             return self.canvas.bind(sequence, func, add)
         return super().bind(sequence, func, add)
 
@@ -1391,9 +1468,14 @@ class CardList(tk.Frame):
             self.hover = iid
             self.redraw()
 
-    def _wheel(self, e):
-        self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
-        self.redraw()
+    def _maybe_redraw(self):
+        try:
+            top = self.canvas.canvasy(0)
+            bottom = top + self.canvas.winfo_height()
+        except tk.TclError:
+            return
+        if top < self._drawn[0] or bottom > self._drawn[1]:
+            self.redraw()
 
     def _scroll(self, *args):
         self.canvas.yview(*args)
@@ -1423,8 +1505,9 @@ class CardList(tk.Frame):
         if not self.order and self.empty:
             c.create_text(width / 2, 60, text=self.empty, fill=self.pal["muted"], font=("Segoe UI", 11))
             return
-        top = c.canvasy(0)
-        bottom = top + max(c.winfo_height(), 400)
+        h = max(c.winfo_height(), 400)
+        top, bottom = c.canvasy(0) - h, c.canvasy(0) + 2 * h      # a screen above and below: gliding rarely redraws
+        self._drawn = (float("-inf") if top <= 0 else top, float("inf") if bottom >= total else bottom)
         for iid in self.order:
             y1 = self.tops[iid]
             y2 = y1 + self.height(iid)

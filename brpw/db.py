@@ -296,6 +296,14 @@ class Database:
                 newly.append(gt)
         return newly
 
+    def crew_decided(self, owner: str, people: List[dict]) -> None:
+        """You marked these players crew or not crew yourself: the automatic tagging leaves them alone from now on."""
+        with self.lock, self.conn:
+            self.conn.executemany("""INSERT INTO crew(owner, xuid, gamertag, tagged) VALUES(?,?,?,1)
+                ON CONFLICT(owner, xuid) DO UPDATE SET tagged=1""",
+                                  [(owner or "", str(m["xuid"]), str(m["gamertag"])) for m in people
+                                   if str(m.get("xuid") or "").isdigit()])
+
     def prune(self, days: int, now: Optional[int] = None) -> int:
         """Forget players not seen for `days` days, so the history doesn't grow forever. Kept whatever their age:
         players with a tag, a 'never link' mark, a Twitch link you made that isn't on the shared master list yet,

@@ -278,12 +278,13 @@ class App(SharedListMixin):
         for w in [r] + [w for w in r.winfo_children() if isinstance(w, tk.Toplevel)]:
             theme_titlebar(w, P)
         old = getattr(self, "_drawn_pal", None)
-        if old and old != P and hasattr(self, "tree"):
+        if old and old != P and hasattr(self, "main_tree"):
             self._recolor(self.root, old, P)
         self._drawn_pal = P
-        if hasattr(self, "tree"):
-            self.tree.tag_configure("friend", background=P["friend"])
-            self.tree.tag_configure("odd", background=P["stripe"])
+        if hasattr(self, "main_tree"):
+            for t in self._lists():
+                t.tag_configure("friend", background=P["friend"])
+                t.tag_configure("odd", background=P["stripe"])
             self.status_lbl.configure(foreground="#ff7b72" if self.status_error else FG)
             self.legend.configure(bg=chat_ui.friend_shade(chat_ui._mix(P["bg"], P["panel"], 0.85)), fg=FG)
             self.spinner.recolor(acc, BG)
@@ -432,11 +433,6 @@ class App(SharedListMixin):
         def make_search(parent, bg):
             return tk.Entry(parent, textvariable=self.search, bg=bg, fg=P["fg"], insertbackground=P["fg"],
                             relief="flat", bd=0, font=("Segoe UI", 10), highlightthickness=0)
-        self.crew_var = tk.StringVar()                    # "⚓ Your sloop: A, B" while you're on a ship
-        self.crew_line = tk.Label(self.players_tab, textvariable=self.crew_var, bg=P["bg"], fg=P["fg"],
-                                  font=("Segoe UI", 10, "bold"), anchor="w")
-        self.crew_line.pack(fill="x", padx=18, pady=(10, 0), before=bar2)
-        self.crew_line.pack_forget()
         self.search_box = chat_ui.RoundBox(bar2, P, P["bg"], make_search, height=38, radius=19)
         self.search_box.pack(side="left", fill="x", expand=True)
         hint = tk.Label(bar2, text="Search players, tags or XUID", bg=self.search_box.fill, fg=P["muted"],
@@ -464,6 +460,8 @@ class App(SharedListMixin):
             self.sort_chips[col] = b
         reset_pill = pill(sortbar, "Reset view", self.reset_table, padx=12, pady=5)
         self.hide_crew = self.db.get_setting("hide_crew", "1") == "1"
+        self.crew_open = self.db.get_setting("crew_open", "1") == "1"      # the crew section unfolded
+        self.crew_now, self.crew_ids = None, []          # your ship right now, and the crewmates' account ids
         self.crew_btn = pill(sortbar, "", self.toggle_crew, padx=12, pady=5)
         self._crew_button()
         self.fields_btn = pill(sortbar, "Show on cards  ▾", self._fields_menu, padx=12, pady=5)
@@ -483,37 +481,53 @@ class App(SharedListMixin):
         self.bars = (bar2, sortbar)
 
         cols = ("gamertag", "hours", "xuid", "tags", "twitch", "last_seen", "origin", "current")
-        self.tree = chat_ui.PlayerCards(self.players_tab, P, cols)
+        self.main_tree = chat_ui.PlayerCards(self.players_tab, P, cols)
+        # your crew while you're on a ship: its own box above the list, folded and unfolded with a click on its title
+        self.crew_box = tk.Frame(self.players_tab, bg=P["bg"])
+        self.crew_title = tk.Label(self.crew_box, bg=P["bg"], fg=P["fg"], font=("Segoe UI", 11, "bold"), anchor="w",
+                                   cursor="hand2", padx=4)
+        self.crew_title.pack(fill="x", padx=(14, 14), pady=(8, 2))
+        self.crew_title.bind("<Button-1>", lambda e: self.toggle_crew_box())
+        self.crew_tree = chat_ui.PlayerCards(self.crew_box, P, cols)
+        self.crew_tree.sb.pack_forget()                   # a few cards: never scrolls
+        self.list_title = tk.Label(self.players_tab, text="Recently played with", bg=P["bg"], fg=P["fg"],
+                                   font=("Segoe UI", 11, "bold"), anchor="w", padx=4)
+        self._list_now = "main"                          # which list the selection actions work on
         self.col_titles = {"gamertag": "Gamertag", "hours": "Hours in SoT", "xuid": "XUID", "tags": "Tags",
                            "twitch": "Twitch", "last_seen": "Last seen", "origin": "Source", "current": "#"}
         self.sort_col, self.sort_desc = "current", False  # Xbox list order (#1 on top), then older history
         saved = self.db.get_setting("player_sort", "").split(":")        # the sort you picked last time
         if len(saved) == 2 and saved[0] in self.SORT_KEYS:
             self.sort_col, self.sort_desc = saved[0], saved[1] == "1"
-        for c, w in self.COL_WIDTHS.items():
-            self.tree.column(c, width=w)
+        for t in self._lists():
+            for c, w in self.COL_WIDTHS.items():
+                t.column(c, width=w)
+            t.tag_configure("friend", background=self.pal["friend"])
+            t.tag_configure("odd", background=self.pal["stripe"])
+            t.set_view(self.list_view)
         self._apply_hidden_columns()
         self._update_headings()
-        self.tree.tag_configure("friend", background=self.pal["friend"])
-        self.tree.tag_configure("odd", background=self.pal["stripe"])
-        self.tree.set_view(self.list_view)
-        self.tree.pack(fill="both", expand=True, padx=(6, 8), pady=(2, 0))
+        self.main_tree.pack(fill="both", expand=True, padx=(6, 8), pady=(2, 0))
         self.bars_shown = True
         if self.db.get_setting("show_bars", "1") == "0":
             self.show_bars(False, quiet=True)
         r.bind("<Control-f>", lambda e: (self._show_page("players"), self.show_bars(True),
                                          self.search_box.inner.focus_set()))
-        self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
-        self.tree.bind("<Double-1>", lambda e: None if self._twitch_cell(e) else self.open_selected())
-        self.tree.bind("<Return>", lambda e: self.open_selected())
-        # per-player actions live in the right-click menu; whole-list actions are in the top bar
-        self.tree.bind("<Button-3>", self._row_menu)
-        self.tree.bind("<Shift-F10>", self._row_menu)
-        for key in ("<App>", "<Menu>"):                    # the menu key: "App" on Windows, "Menu" on Linux
-            try:
-                self.tree.bind(key, self._row_menu)
-            except tk.TclError:                            # not a key name on this system
-                pass
+        for name, t in (("main", self.main_tree), ("crew", self.crew_tree)):
+            def on(h, name=name):                          # every action works on the list it happened in
+                return lambda e: (self._use_list(name), h(e))[1]
+            t.bind("<Button-1>", on(lambda e: None))
+            t.bind("<ButtonRelease-1>", on(self._on_tree_click))
+            t.bind("<Double-1>", on(lambda e: None if self._twitch_cell(e) else self.open_selected()))
+            t.bind("<Return>", on(lambda e: self.open_selected()))
+            # per-player actions live in the right-click menu; whole-list actions are in the top bar
+            t.bind(chat_ui.RIGHT_CLICK, on(self._row_menu))
+            t.bind("<Shift-F10>", on(self._row_menu))
+            for key in ("<App>", "<Menu>"):                # the menu key: "App" on Windows, "Menu" on Linux
+                try:
+                    t.bind(key, on(self._row_menu))
+                except tk.TclError:                        # not a key name on this system
+                    pass
 
         # ---- status bar: what's happening on the left, legend and count on the right
         self.status = tk.StringVar()
@@ -568,8 +582,9 @@ class App(SharedListMixin):
         self.db.set_setting("player_sort", "current:0")
         self.db.set_setting("hidden_columns", DEFAULT_HIDDEN)
         self._apply_hidden_columns()
-        for c, w in self.COL_WIDTHS.items():
-            self.tree.column(c, width=w)
+        for t in self._lists():
+            for c, w in self.COL_WIDTHS.items():
+                t.column(c, width=w)
         self._update_headings()
         self.search.set("")                       # also reloads
         self.reload(to_top=True)
@@ -595,42 +610,94 @@ class App(SharedListMixin):
         self._column_menu(ev)
 
     def reload(self, to_top=False):
-        sel = set() if to_top else {self.tree.set(i, "xuid") + "|" + self.tree.set(i, "gamertag")
-                                    for i in self.tree.selection()}
-        top = 0.0 if to_top else self.tree.yview()[0]
-        self.tree.delete(*self.tree.get_children())
+        tree = self.main_tree
+        sel = set() if to_top else {t.set(i, "xuid") + "|" + t.set(i, "gamertag")
+                                    for t in self._lists() for i in t.selection()}
+        top = 0.0 if to_top else tree.yview()[0]
+        for t in self._lists():
+            t.delete(*t.get_children())
         live_ids = {r["id"] for r in self.live.live_now()}   # Xbox says broadcasting (fresh results only)
         now = time.time()
         rows = sorted(self.db.list_accounts(self.search.get(), self.xkey.active()),
                       key=self.SORT_KEYS[self.sort_col], reverse=self.sort_desc)
+        aboard = {i: n for n, i in enumerate(self.crew_ids)}
+        crew_rows = sorted((a for a in rows if a["id"] in aboard), key=lambda a: aboard[a["id"]])
+        rows = [a for a in rows if a["id"] not in aboard]  # your crew right now: in its own section on top
         if self.hide_crew:                                   # your crewmates aren't "recently met"
             crew = self.db.CREW_TAG.casefold()
             rows = [a for a in rows if crew not in [t.strip().casefold() for t in (a["tags"] or "").split(",")]]
+        for n, a in enumerate(crew_rows):
+            self._insert_player(self.crew_tree, a, n, now, live_ids, sel)
+        self._show_crew_box(len(crew_rows))
         for n, a in enumerate(rows):
-            friend = a["relation"] in ("Friend", "In your list")
-            tw_live = twitch_live(a, now)                    # exact: Twitch itself says this saved channel is live
-            if a["twitch_never"] is not None:
-                tw_text = "⛔ " + (a["twitch_never"] or "never link")
-            else:
-                tw_text = (a["twitch_name"] or "") + {"auto": " ⚙", "shared": SHARED_MARK}.get(
-                    a["twitch_source"], "")
-                if tw_live:
-                    v = a["twitch_viewers"]
-                    tw_text = (f"● {v}  " if v is not None else "●  ") + tw_text
-            live = a["id"] in live_ids or tw_live
-            iid = self.tree.insert(
-                "", "end", iid=str(a["id"]), image=self._row_picture(a["pic"], live),
-                tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()) + (("live",) if live else ()),
-                values=(
-                    a["gamertag"], hours_text(a["sot_minutes"], a["stats_at"]), a["xuid"] or "", a["tags"] or "",
-                    tw_text, fmt_ts(a["last_seen"]),
-                    "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
-                    str(a["pos"] + 1) if a["pos"] is not None else ""))
-            if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
-                self.tree.selection_add(iid)
-        self.tree.yview_moveto(top)  # a background refresh must not scroll the list back to the top
+            self._insert_player(tree, a, n, now, live_ids, sel)
+        tree.yview_moveto(top)  # a background refresh must not scroll the list back to the top
         self.count_lbl.configure(text=f"{self.db.count_accounts()} unique accounts")
-        self._shown_xuids = [a["xuid"] for a in rows[:150] if a["xuid"]]       # for the pictures/hours round
+        self._shown_xuids = [a["xuid"] for a in (crew_rows + rows)[:150] if a["xuid"]]   # pictures/hours round
+
+    def _lists(self):
+        return [t for t in (getattr(self, "main_tree", None), getattr(self, "crew_tree", None)) if t is not None]
+
+    @property
+    def tree(self):
+        """The list the selection actions (menu, double-click, keys) work on: the one clicked last."""
+        return self.crew_tree if self._list_now == "crew" and self.crew_box.winfo_manager() else self.main_tree
+
+    def _use_list(self, name):
+        if name != self._list_now:                        # one selection at a time, in the list you clicked
+            other = self.main_tree if name == "crew" else self.crew_tree
+            other.selection_remove(*other.selection())
+            self._list_now = name
+
+    def _show_crew_box(self, cards):
+        """The crew box above the list while you're on a ship (with its title), else nothing."""
+        if not self.crew_now:
+            self.crew_box.pack_forget()
+            self.list_title.pack_forget()
+            self._list_now = "main"
+            return
+        n = len(self.crew_now["members"])
+        self.crew_title.configure(text=("▾" if self.crew_open else "▸") + f"   ⚓  Your {self.crew_now['ship']}   ·   "
+                                  + (f"{n} aboard" if n else "just you"))
+        if self.crew_open and cards:
+            t = self.crew_tree
+            t.canvas.configure(height=t.TOP * 2 + cards * t.ROW)
+            t.pack(fill="x", padx=(6, 8), pady=(0, 2))
+        else:
+            self.crew_tree.pack_forget()
+        if not self.crew_box.winfo_manager():
+            self.crew_box.pack(fill="x", before=self.main_tree)
+            self.list_title.pack(fill="x", padx=14, pady=(8, 2), before=self.main_tree)
+
+    def toggle_crew_box(self):
+        """A click on the crew title folds or unfolds your crew (remembered)."""
+        self.crew_open = not self.crew_open
+        self.db.set_setting("crew_open", "1" if self.crew_open else "0")
+        self.reload()
+
+    def _insert_player(self, tree, a, n, now, live_ids, sel):
+        """One player card (row) in the list."""
+        friend = a["relation"] in ("Friend", "In your list")
+        tw_live = twitch_live(a, now)                    # exact: Twitch itself says this saved channel is live
+        if a["twitch_never"] is not None:
+            tw_text = "⛔ " + (a["twitch_never"] or "never link")
+        else:
+            tw_text = (a["twitch_name"] or "") + {"auto": " ⚙", "shared": SHARED_MARK}.get(
+                a["twitch_source"], "")
+            if tw_live:
+                v = a["twitch_viewers"]
+                tw_text = (f"● {v}  " if v is not None else "●  ") + tw_text
+        live = a["id"] in live_ids or tw_live
+        iid = tree.insert(
+            "", "end", iid=str(a["id"]), image=self._row_picture(a["pic"], live),
+            tags=(("friend",) if friend else ()) + (("odd",) if n % 2 else ()) + (("live",) if live else ()),
+            values=(
+                a["gamertag"], hours_text(a["sot_minutes"], a["stats_at"]), a["xuid"] or "", a["tags"] or "",
+                tw_text, fmt_ts(a["last_seen"]),
+                "Live" if a["source"] in ("xbox-live", "openxbl") else "Import",
+                str(a["pos"] + 1) if a["pos"] is not None else ""))
+        if (a["xuid"] or "") + "|" + a["gamertag"] in sel:
+            tree.selection_add(iid)
 
     VIEW_NAMES = {"cards": "Cards", "compact": "Compact", "rows": "Rows"}
     VIEW_PICTURE = {"cards": chat_ui.PICTURE_SIZE, "compact": 32, "rows": 0}
@@ -640,7 +707,8 @@ class App(SharedListMixin):
         self.list_view = view
         self.db.set_setting("list_view", view)
         self.view_var.set(self.VIEW_NAMES[view])
-        self.tree.set_view(view)
+        for t in self._lists():
+            t.set_view(view)
         self.reload()
 
     def show_bars(self, on, quiet=False):
@@ -651,7 +719,8 @@ class App(SharedListMixin):
         self.db.set_setting("show_bars", "1" if on else "0")
         for w in self.bars:
             if on:
-                w.pack(fill="x", padx=14, pady=(12, 4) if w is self.bars[0] else (6, 4), before=self.tree)
+                first = self.crew_box if self.crew_box.winfo_manager() else self.main_tree
+                w.pack(fill="x", padx=14, pady=(12, 4) if w is self.bars[0] else (6, 4), before=first)
             else:
                 w.pack_forget()
         if not quiet:
@@ -763,6 +832,7 @@ class App(SharedListMixin):
         linked = bool(self.db.twitch_links(ids))
         never = self.db.twitch_never(ids)
         all_never = bool(ids) and len(never) == len(ids)
+        all_crew = bool(ids) and all(self.db.CREW_TAG in self.db.tags_for([i]) for i in ids)
         p = self._one_player() if one else None
         xbox_ok = bool(p and p[1] and self.xkey.get())
         following = xbox_ok and self.db.friend_relations(self.xkey.active()).get(p[1]) in self.FOLLOWING
@@ -779,6 +849,7 @@ class App(SharedListMixin):
             (None, None, True),
             ("Tag...", self.tag_selected, True),
             ("Untag", self.untag_selected, True),
+            ("Not crew" if all_crew else "Mark as crew", self.crew_selected, bool(ids)),
             (None, None, True),
             ("Link Twitch channel...", self.link_twitch_selected, one),
             ("Allow linking again" if all_never else "Never link...", self.never_link_selected, True),
@@ -789,7 +860,8 @@ class App(SharedListMixin):
 
     def _apply_hidden_columns(self):
         hidden = set(filter(None, self.db.get_setting("hidden_columns", DEFAULT_HIDDEN).split(",")))
-        self.tree["displaycolumns"] = [c for c in self.tree["columns"] if c not in hidden]
+        for t in self._lists():
+            t["displaycolumns"] = [c for c in t["columns"] if c not in hidden]
 
     def toggle_column(self, col):
         hidden = set(filter(None, self.db.get_setting("hidden_columns", DEFAULT_HIDDEN).split(",")))
@@ -835,10 +907,7 @@ class App(SharedListMixin):
             x, y = self.tree.winfo_rootx() + 40, self.tree.winfo_rooty() + box[1] + box[3]
         else:
             y = event.y_root
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
+        chat_ui.popup(m, x, y)
 
     def _selected_ids(self):
         return [int(i) for i in self.tree.selection()]
@@ -908,15 +977,11 @@ class App(SharedListMixin):
             if err or key != self.xkey.get():
                 return                                   # quiet: the next refresh tries again
             self.crew_now = res
-            if not res:
-                self.crew_var.set("")
-                return self.crew_line.pack_forget()
-            names = [m["gamertag"] for m in res["members"]]
-            self.crew_var.set(f"⚓  Your {res['ship']}: " + (", ".join(names) if names else "just you"))
-            self.crew_line.pack(fill="x", padx=18, pady=(10, 0), before=self.search_box.master)
-            newly = self.db.note_crew(owner, res["session"], res["members"])
+            self.crew_ids = [self.db.ensure_account(m["gamertag"], m["xuid"], source="crew")
+                             for m in (res or {}).get("members") or []]
+            newly = self.db.note_crew(owner, res["session"], res["members"]) if res else []
+            self.reload()
             if newly:
-                self.reload()
                 self.set_status(f"Crewmate(s) found: {', '.join(newly)} (tagged crew"
                                 + (", hidden from the list" if self.hide_crew else "") + "; untag to show again).")
         threading.Thread(target=work, daemon=True).start()
@@ -2185,6 +2250,22 @@ class App(SharedListMixin):
             self.db.remove_tag(ids, tag)
             self.reload()
 
+    def crew_selected(self):
+        """Right-click → Mark as crew / Not crew: the same tag the automatic crew detection gives, by hand. Either way
+        the automatic tagging leaves these players alone afterwards."""
+        ids = self._selected_ids()
+        if not ids:
+            return
+        make = not all(self.db.CREW_TAG in self.db.tags_for([i]) for i in ids)
+        (self.db.add_tag if make else self.db.remove_tag)(ids, self.db.CREW_TAG)
+        people = [{"xuid": self.tree.set(str(i), "xuid"), "gamertag": self.tree.set(str(i), "gamertag")}
+                  for i in ids]
+        self.db.crew_decided(self.xkey.active() or "", people)
+        names = ", ".join(p["gamertag"] for p in people[:3]) + ("..." if len(people) > 3 else "")
+        self.reload()
+        self.set_status(f"{names}: crew" + (" (hidden from the list; Crew shown shows them)" if self.hide_crew else "")
+                        if make else f"{names}: not crew any more.")
+
     def encounters_dialog(self):
         ids = self._selected_ids()
         if not ids:
@@ -2783,7 +2864,7 @@ class App(SharedListMixin):
             m.tk_popup(e.x_root, e.y_root)
 
         tv.bind("<Double-1>", lambda e: open_stream())
-        tv.bind("<Button-3>", card_menu)
+        tv.bind(chat_ui.RIGHT_CLICK, card_menu)
 
         def reset():
             """Back to the default view: no filters, most viewers first."""
@@ -3153,7 +3234,7 @@ class App(SharedListMixin):
                                                                                      xuids.get(r["id"]) or ""))
             m.tk_popup(e.x_root, e.y_root)
         tv.bind("<Double-1>", lambda e: open_twitch())
-        tv.bind("<Button-3>", card_menu)
+        tv.bind(chat_ui.RIGHT_CLICK, card_menu)
 
         bar = tk.Frame(win, bg=P["head"])
         bar.pack(side="bottom", fill="x")

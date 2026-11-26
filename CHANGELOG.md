@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2 — 2026-11-26
+**New**
+- **Crew box:** your crew has its own foldable box above "Recently played with" (⚓ Your galleon · 3 aboard), with the same cards as the list. Crewmates are no longer mixed into the recently-played list while you sail.
+- **Mark as crew / Not crew** in a player's right-click menu. The automatic tagging leaves players you decided about alone.
+
+**Fixed**
+- **Crew detection:** your crew wasn't found, because Xbox's ship entry points to a lobby that lists only you. The app now follows it to the session with the whole crew, including crewmates who aren't Xbox friends.
+- The crew stayed only for part of a voyage: Sea of Thieves stops publishing your ship after a while. The app keeps reading the same crew session while you're in the game and still aboard.
+- **Hourglass:** no crew was found, because the game publishes no ship there. The crew is now found in the list of Xbox sessions you're in. Only a session for your own kind of ship and no bigger counts, so opponents are never taken for crew.
+- **Friend labels** disappeared after a refresh: Xbox friends who don't follow you (or whom you don't follow) are now always labelled Friend.
+- **Scrolling** glides instead of jumping, in every list and in chats (smoother on Linux especially).
+- **Linux:** right-click menus needed the button held down; they now stay open after a normal click.
+
 ## 0.4.1 — 2026-11-25
 **Fixed (Linux)**
 - Signing in failed with `CERTIFICATE_VERIFY_FAILED`, and so did every other connection: the Linux programs looked for trusted certificates where the build machine keeps them. They now use your system's own list (or `SSL_CERT_FILE` when you set it).

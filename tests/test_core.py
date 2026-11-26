@@ -380,6 +380,44 @@ def test_app_startup_shutdown(tmp_path, monkeypatch):
     app.toggle_crew()
     d.remove_tag([new_id], "crew")
     app.reload()
+    # on a ship: your crew in its own box above the list (cards like the rest), folded and unfolded with a click
+    mate = {r["gamertag"]: r["id"] for r in d.list_accounts()}["Old"]
+    app.crew_now = {"ship": "galleon", "session": "s1", "max": 4,
+                    "members": [{"xuid": "9901", "gamertag": "Salty"}, {"xuid": "9902", "gamertag": "Kraken"}]}
+    app.crew_ids = [mate, new_id]
+    app.reload()
+    root.update()
+    assert app.crew_tree.get_children() == (str(mate), str(new_id))
+    assert not set(app.crew_tree.get_children()) & set(app.main_tree.get_children())   # separated, not twice
+    assert app.crew_box.winfo_manager() == 'pack' and app.list_title.winfo_manager() == 'pack'
+    assert "galleon" in app.crew_title.cget("text") and "2 aboard" in app.crew_title.cget("text")
+    app._use_list("crew")                                               # actions work on the list you clicked
+    app.crew_tree.selection_set(str(mate))
+    assert app.tree is app.crew_tree and app._selected_ids() == [mate]
+    app._use_list("main")
+    assert app.tree is app.main_tree and app.crew_tree.selection() == ()
+    app.toggle_crew_box()                                               # fold: remembered
+    root.update()
+    assert app.crew_tree.winfo_manager() == '' and app.crew_box.winfo_manager() == 'pack' and d.get_setting("crew_open") == "0"
+    app.toggle_crew_box()
+    root.update()
+    assert app.crew_tree.winfo_manager() == 'pack' and d.get_setting("crew_open") == "1"
+    app.crew_now, app.crew_ids = None, []                              # off the ship: no box
+    app.reload()
+    root.update()
+    assert app.crew_box.winfo_manager() == '' and app.list_title.winfo_manager() == ''
+    app._use_list("main")                                               # by hand: right-click > Mark as crew
+    app.toggle_crew()                                                   # Crew shown, so the marked one stays listed
+    app.main_tree.selection_set(str(new_id))
+    assert ("Mark as crew", app.crew_selected, True) in app._row_menu_items()
+    app.crew_selected()
+    assert "crew" in d.tags_for([new_id]) and ("Not crew", app.crew_selected, True) in app._row_menu_items()
+    app.crew_selected()
+    assert "crew" not in d.tags_for([new_id])
+    app.toggle_crew()
+    new2_xuid = app.main_tree.set(str(new_id), "xuid") or "77001"
+    assert d.note_crew("Main", "x1", [{"xuid": new2_xuid, "gamertag": "New2"}]) == []   # decided by hand: left alone
+    assert d.note_crew("Main", "x2", [{"xuid": new2_xuid, "gamertag": "New2"}]) == []
     # spinner: runs while a job is busy, stops when the last one finishes
     app._set_busy("sync", True)
     app._set_busy("live", True)
@@ -1240,3 +1278,14 @@ def test_your_own_account_picture_is_read_from_the_account_settings():
         "https://images-eds-ssl.xboxlive.com/image?url=me"
     assert asked == [{"X-Authorization": "key"}]
     assert account_picture("k", http=lambda *a: {"content": {"profileUsers": [{"settings": []}]}}) == ""
+
+
+def test_xbox_friends_are_friends_whatever_the_follow_flags_say():
+    # seen for real 2026-11-25: Xbox friends come with isFriend true but isFollowedByCaller false, and the refresh
+    # after a sync saved all 113 friends as "Follows you"
+    from brpw.providers import parse_friends
+    assert parse_friends({"content": {"people": [
+        {"xuid": "1", "isFriend": True, "isFollowedByCaller": False, "isFollowingCaller": True},
+        {"xuid": "2", "isFriend": True},
+        {"xuid": "3", "isFriend": False, "isFollowedByCaller": False, "isFollowingCaller": True}]}}) == {
+        "1": "Friend", "2": "Friend", "3": "Follows you"}

@@ -360,7 +360,9 @@ def parse_friends(payload) -> dict:
         if not x:
             continue
         mine, theirs = p.get("isFollowedByCaller"), p.get("isFollowingCaller")
-        if mine is None and theirs is None:
+        if p.get("isFriend") is True:                  # Xbox's friend system (a request accepted): always a friend,
+            out[x] = "Friend"                          # whatever the follow flags say (they're often both false)
+        elif mine is None and theirs is None:
             out[x] = "In your list"
         elif mine and theirs:
             out[x] = "Friend"
